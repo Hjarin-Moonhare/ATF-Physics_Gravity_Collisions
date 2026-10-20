@@ -109,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 19, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 20, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -347,6 +347,7 @@ struct Settings {
     float sizeSmall = 0.5f;
     float sizeOverride = 0.0f;    // > 0: this factor for every body instead (to try the scaling by hand)
     float maxLevel = 3.0f;   // the installed level x the size factor never goes above this
+    float maxBack = 2.0f, maxSide = 2.4f, maxHang = 2.3f, maxDown = 3.0f;   // each gravity shape's largest level
     bool stretchGuard = true;     // each body's breast gravity held to the strain the base body has at the same setting
     bool snapshots = false;       // log one body's collision positions every 5 s (for diagnosing collisions)
     bool proxies = false;         // watch the world-collision proxy bodies ([World] bProxies), read only
@@ -414,6 +415,11 @@ static void LoadSettings() {
     g_cfg.sideSlump = clamp15(readF("fSideSlump", g_cfg.sideSlump));
     g_cfg.faceDownSquash = clamp15(readF("fFaceDownSquash", g_cfg.faceDownSquash));
     g_cfg.hangShape = clamp15(readF("fHangShape", g_cfg.hangShape));
+    // each gravity shape's largest level (the effective level, installed level x breast size)
+    g_cfg.maxBack = clampf(readF("fMaxBack", g_cfg.maxBack), 0.5f, 8.0f);
+    g_cfg.maxSide = clampf(readF("fMaxSide", g_cfg.maxSide), 0.5f, 8.0f);
+    g_cfg.maxHang = clampf(readF("fMaxHang", g_cfg.maxHang), 0.5f, 8.0f);
+    g_cfg.maxDown = clampf(readF("fMaxDown", g_cfg.maxDown), 0.5f, 8.0f);
     g_cfg.fixedFrameRate = GetPrivateProfileIntA("Springs", "bFixedFrameRate", 1, g_iniPath) != 0;
     char buf[64];
     GetPrivateProfileStringA("Springs", "fSpringGravity", "", buf, sizeof(buf), g_iniPath);
@@ -432,7 +438,7 @@ static void LoadSettings() {
     g_cfg.sizeLarge = readS("Size", "fLarge", g_cfg.sizeLarge, 0, 2);
     g_cfg.sizeSmall = readS("Size", "fSmall", g_cfg.sizeSmall, 0, 0.9f);
     g_cfg.sizeOverride = readS("Size", "fOverride", g_cfg.sizeOverride, 0, 3);
-    g_cfg.maxLevel = readS("Size", "fMaxLevel", g_cfg.maxLevel, 0.5f, 3.0f);
+    g_cfg.maxLevel = readS("Size", "fMaxLevel", g_cfg.maxLevel, 0.5f, 8.0f);
     g_cfg.stretchGuard = GetPrivateProfileIntA("Gravity", "bStretchGuard", 1, g_iniPath) != 0;
     g_cfg.snapshots = GetPrivateProfileIntA("Log", "bSnapshots", 0, g_iniPath) != 0;
     g_cfg.proxies = GetPrivateProfileIntA("World", "bProxies", 0, g_iniPath) != 0;
@@ -502,21 +508,27 @@ static void LoadSettings() {
 //               Minimal presets)
 //   [Breasts] [Butt] [Belly] [Thighs] [Hips] [Calves] [Arms] [Torso]
 //               sLevel: whose springs the part uses: Preset (as installed), Off, or Minimal, Lower, Realistic, Low,
-//               Medium, High, Max (that preset's springs at the installed extra-jiggle level; Minimal and Lower are
-//               Realistic's with a quarter and half its swing); fSwing; fSideToSide, fFrontBack, fUpDown (per COM axis);
-//               fSettle (x its damping, never looser than the Max preset); fBounceSpeed (x its springs' frequency);
-//               fSag (g, the gravity inside its springs); and a key per bone of the part (x that bone's swing)
+//               Medium, High, Max, Ultra (that preset's springs at the installed extra-jiggle level, Ultra Max's, and
+//               the level's swing on top: x0.25 .. x3 of Realistic's movement, preset_data.h); bMatchLevel (1: the part
+//               moves the level's strength too, where the presets give it a smaller share); fSwing; fSideToSide,
+//               fFrontBack, fUpDown (per COM axis); fSettle (x its damping, never looser than the Max preset);
+//               fBounceSpeed (x its springs' frequency); fSag (g, the gravity inside its springs); and a key per bone
+//               of the part (x that bone's swing)
 //   [Player], [NPC <hex form ID>]   fAll, fBreasts .. fTorso: x the swing of that character's parts (an NPC by its
 //               reference's form ID, as the console shows it, or its base record's)
 //   [Outfit <name>]   sSlots (biped slots, comma separated) or sForm (an armour's form ID, hex), and fAll, fBreasts ..
 //               fTorso: x the swing of a body wearing such a piece (per part the lowest of everything it wears)
 // Every value is held to its range; a key left out keeps what an earlier file said.
 enum { kLevelPreset = -1, kLevelOff = kNumLevels };
+static_assert(kNumMatchParts == kNumParts, "preset_data.h's match table lists the parts of body_shape_data.h");
 static const char* const kPartSection[kNumParts] = {"Breasts", "Butt", "Belly", "Thighs", "Hips", "Calves", "Arms", "Torso"};
 struct PartTune {
     int level = kLevelPreset;
     float swing = 1.0f, dir[3] = {1.0f, 1.0f, 1.0f}, settle = 1.0f, bounce = 1.0f;   // dir: side, fore/aft, up
     float sag = -1.0f;   // the springs' gravity, g; -1: TFPhysics.ini [Springs]
+    bool match = false;  // bMatchLevel: the part moves the level's strength (kLevelMatch), not the presets' share
+    float limit = -1.0f; // fTravelLimit: the farthest it travels, x its Max + Max travel; -1: kPartTravelLimit
+    float gravLevel = -1.0f;   // fGravityLevel ([Breasts]): every body's breast gravity level; -1: as installed
 };
 struct CharTune { std::uint32_t id = 0; bool player = false; float part[kNumParts] = {}; };
 struct OutfitTune { std::uint64_t slots = 0; std::uint32_t form = 0; float part[kNumParts] = {}; char name[40] = {}; };
@@ -604,6 +616,17 @@ static void ReadTuneFile(const char* file, TuneSettings& t) {
         if (part >= 0) {
             PartTune& pt = t.part[part];
             if (IniHas(file, sec, "sLevel", b, sizeof(b)) && LevelNamed(b) != -2) pt.level = LevelNamed(b);
+            if (IniHas(file, sec, "bMatchLevel", b, sizeof(b))) pt.match = atoi(b) != 0;
+            if (IniHas(file, sec, "fTravelLimit", b, sizeof(b))) {
+                float lim = 1.0f;
+                IniF(file, sec, "fTravelLimit", lim, 0.5f, 3.0f);
+                pt.limit = lim;
+            }
+            if (part == kPartBreast && IniHas(file, sec, "fGravityLevel", b, sizeof(b))) {   // 0: as installed
+                float g = 0.0f;
+                IniF(file, sec, "fGravityLevel", g, 0.0f, 8.0f);
+                pt.gravLevel = g > 0.0f ? (g < 0.5f ? 0.5f : g) : -1.0f;
+            }
             IniF(file, sec, "fSwing", pt.swing, 0.0f, 3.0f);
             IniF(file, sec, "fSideToSide", pt.dir[0], 0.0f, 3.0f);
             IniF(file, sec, "fFrontBack", pt.dir[1], 0.0f, 3.0f);
@@ -692,8 +715,8 @@ static void TuneFlags(TuneSettings& t) {
         const PartTune& pt = t.part[p];
         const int l = LevelOf(t, p);
         if (l >= 0 && l < kNumLevels) t.springs = t.damping = true;
-        if (l == kLevelOff || (l >= 0 && l < kNumLevels && kLevelSwing[l] != 1.0f)) t.scaled = true;
-        if (pt.swing != 1.0f || pt.dir[0] != 1.0f || pt.dir[1] != 1.0f || pt.dir[2] != 1.0f) t.scaled = true;
+        if (l == kLevelOff || (l >= 0 && l < kNumLevels && (kLevelSwing[l] != 1.0f || pt.match))) t.scaled = true;
+        if (pt.swing != 1.0f || pt.dir[0] != 1.0f || pt.dir[1] != 1.0f || pt.dir[2] != 1.0f || pt.limit > 0.0f) t.scaled = true;
         if (pt.bounce != 1.0f) t.springs = t.damping = true;
         if (pt.settle != 1.0f) t.damping = true;
     }
@@ -1193,7 +1216,10 @@ static const Vec3 kHangBone[4] = {{1.0f, 0, 0}, {2.0f, 0.2f, 0}, {1.2f, 0, 0.4f}
 // stays within the approved back slump's peak stretch at x2 (62%) on the base body (measured on A-Body's mesh:
 // at x3 the back slump reached 95%, the teardrop 81%, the side 76%, face down 46%).  A bigger breast stretches less at
 // the same level (Large 100% at x3: 83 / 62 / 61 / 42%), so these hold for every size.
-constexpr float kMaxLevelBack = 2.0f, kMaxLevelSide = 2.4f, kMaxLevelHang = 2.3f, kMaxLevelDown = 3.0f;
+// these are the defaults of [Gravity] fMaxBack (2.0), fMaxSide (2.4), fMaxHang (2.3) and fMaxDown (3.0), in
+// Settings.  The skin's own limits are higher (tests\stretch_limit_parts.py, folds or skin through itself: back and
+// side from x3.75, bent forward and on all fours from x6, face down from x7; on all fours with the springs' sag at its
+// most on top: none up to x5.75).
 
 struct Anchor { void* node = nullptr; void* com = nullptr; const float* rest = nullptr; void* bones[4] = {}; };
 
@@ -1917,13 +1943,22 @@ static void LogTuning(const char* what, const TuneSettings& t) {
         (void)t;
         return;
     } else {
-        char parts[1400];
+        char parts[2800];
         size_t len = 0;
-        for (int p = 0; p < kNumParts && len + 160 < sizeof(parts); ++p) {
+        for (int p = 0; p < kNumParts && len + 330 < sizeof(parts); ++p) {
             const PartTune& pt = t.part[p];
             const int l = LevelOf(t, p);
-            char sag[32] = "";
+            char sag[160] = "";
             if (pt.sag >= 0.0f) snprintf(sag, sizeof(sag), ", sag %.3f g", pt.sag);
+            if (pt.match) strcat_s(sag, ", the level's full strength");
+            if (pt.limit > 0.0f) {
+                const size_t sl = strlen(sag);
+                snprintf(sag + sl, sizeof(sag) - sl, ", travel limit x%.2f", pt.limit);
+            }
+            if (pt.gravLevel > 0.0f) {
+                const size_t sl = strlen(sag);
+                snprintf(sag + sl, sizeof(sag) - sl, ", gravity level x%.2f for every body", pt.gravLevel);
+            }
             len += snprintf(parts + len, sizeof(parts) - len, " %s %s (swing x%.2f, side x%.2f, fore/aft x%.2f, up x%.2f, settle "
                             "x%.2f, bounce x%.2f%s);", kPartName[p], l == kLevelPreset ? "as installed" : l == kLevelOff ? "off"
                             : kLevelName[l], pt.swing, pt.dir[0], pt.dir[1], pt.dir[2], pt.settle, pt.bounce, sag);
@@ -2030,9 +2065,10 @@ static void TakeFactors(ActorView& v, const BodyFactors& f) {
 }
 
 // a spring as tuned.  Its part's level gives it that preset's springs (the bone's in preset_data.h, at the
-// extra-jiggle level its record was built with) and that level's swing; Off keeps the springs and swings nothing;
-// fBounceSpeed multiplies the strength by its square (the frequency goes with sqrt(strength)).  A record no installer
-// setting matches keeps its own springs (a level then changes only the swing)
+// extra-jiggle level its record was built with; Ultra: Max's) and that level's swing (the swing that makes
+// the level's strength, x0.25 .. x3 of Realistic, and with bMatchLevel the part's factor to reach it too); Off keeps
+// the springs and swings nothing; fBounceSpeed multiplies the strength by its square (the frequency goes with
+// sqrt(strength)).  A record no installer setting matches keeps its own springs (a level then changes only the swing)
 static void EffectiveOf(const SpringInfo& info, const TuneSettings& T, SpringEff& e) {
     std::memcpy(e.strength, info.origStrength, 12);
     std::memcpy(e.ratio, info.origRatio, 12);
@@ -2050,6 +2086,7 @@ static void EffectiveOf(const SpringInfo& info, const TuneSettings& T, SpringEff
             std::memcpy(e.strength, s.strength, 12);
             std::memcpy(e.ratio, s.damping, 12);
             std::memcpy(e.travel, s.maxDist, 12);
+            if (pt.match) e.swing *= kLevelMatch[l][info.instExtra][info.part];
         }
     }
     if (pt.bounce != 1.0f)
@@ -2076,6 +2113,10 @@ static const SpringEff& EffOf(ActorView& v, int i, const TuneSettings& T) {
 // stop at its own size, and the skin between them stretched up to x1.19 the release's worst (tests\body_shape_stretch.py:
 // 15 installer settings x 7 bodies x 5 motions at 60 fps; one ceiling per part: 8 of 525 runs above it, by 0.09 mm at
 // most, peak 11.59 mm against the release's 11.57).
+// the farthest each part may travel, x that largest travel: the skin's tested limit (tests\stretch_limit_parts.py:
+// one part at a time past it, on the v0.7 mesh, walk, run and jump landing at 60 fps, the last step before the skin
+// folds over or passes through itself).  [Part] fTravelLimit overrides it.
+constexpr float kPartTravelLimit[kNumParts] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 static void PartCeilings(ActorView& v) {
     const TuneSettings& T = Tune();
     for (auto& c : v.partCeil)
@@ -2084,8 +2125,9 @@ static void PartCeilings(ActorView& v) {
         const SpringInfo* info = InfoOf(v, i);
         if (!info || info->part < 0) continue;
         const SpringEff& e = EffOf(v, i, T);   // against the travel as tuned (the installed one untuned)
+        const float lim = T.part[info->part].limit > 0.0f ? T.part[info->part].limit : kPartTravelLimit[info->part];
         for (int k = 0; k < 3; ++k) {
-            const float c = e.travel[k] > 1e-6f && info->maxTravel[k] > e.travel[k] ? info->maxTravel[k] / e.travel[k] : 1.0f;
+            const float c = e.travel[k] > 1e-6f ? info->maxTravel[k] * lim / e.travel[k] : 1.0f;
             if (c < v.partCeil[info->part][k]) v.partCeil[info->part][k] = c;
         }
     }
@@ -2095,7 +2137,7 @@ static void PartCeilings(ActorView& v) {
     v.ceilReady = true;
 }
 
-// the part's jiggle on a spring: the body's (shape, character, outfit) x the level's swing x fSwing
+// the part's jiggle on a spring: the body's (shape, character, outfit) x the level's swing (and match) x fSwing
 static float PartJiggle(const ActorView& v, const SpringInfo& info, const SpringEff& e, const TuneSettings& T) {
     return v.jiggle[info.part] * e.swing * T.part[info.part].swing;
 }
@@ -2106,7 +2148,7 @@ static bool AxisJiggleOf(const ActorView& v, const SpringInfo& info, const Sprin
     bool held = false;
     for (int k = 0; k < 3; ++k) {
         const float jk = j * T.part[info.part].dir[k];
-        out[k] = jk <= 1.0f ? jk : (jk < v.partCeil[info.part][k] ? jk : v.partCeil[info.part][k]);
+        out[k] = jk < v.partCeil[info.part][k] ? jk : v.partCeil[info.part][k];   // (a limit below 1 holds too)
         held |= out[k] < jk;
     }
     return held;
@@ -2142,7 +2184,9 @@ static float BreastSag(const ActorView& v) {
     float cap = 1.0f / v.strain;
     cap = cap > 1.3f ? 1.3f : (cap < 0.15f ? 0.15f : cap);
     const float free = g_cfg.shapeMax > cap ? g_cfg.shapeMax : cap;
-    const float t = v.level <= 1.0f ? 0.0f : (v.level >= 2.0f ? 1.0f : v.level - 1.0f);
+    const float over = Tune().part[kPartBreast].gravLevel;   // a tuned level counts as installed
+    const float lvl = over > 0.0f ? over : v.level;
+    const float t = lvl <= 1.0f ? 0.0f : (lvl >= 2.0f ? 1.0f : lvl - 1.0f);
     const float most = free + t * (cap - free);
     return v.size < most ? v.size : most;
 }
@@ -2181,7 +2225,9 @@ static void PreUpdate(ActorView& v) {
         if (part >= 0 && (v.shapeOn || v.tuned || tuning || touched)) {
             if (!v.ceilReady) PartCeilings(v);
             AxisJiggleOf(v, *info, e, T, j);
-            SetDampingOf(inst, e, *info, PartJiggle(v, *info, e, T), T.part[part].settle);
+            // the level's swing is not in the damping's jiggle: a level is its preset's springs as they are,
+            // with the swing on top (so a level's strength is exact); the body's factors and fSwing move it as before
+            SetDampingOf(inst, e, *info, v.jiggle[part] * T.part[part].swing, T.part[part].settle);
         }
         // the tuned springs go into the shared record (every body writes the same values, so their order
         // doesn't matter: the game reads strength and MaxDist from it on every update), and the instance's sub-step
@@ -2399,14 +2445,16 @@ static void PostUpdate(ActorView& v, int site) {
         const float hipTilt = std::acos(std::fmax(-1.f, std::fmin(1.f, Row(a.com, 0x80, 2).z))) * 57.2957795f;
         const float lying = Clamp01((hipTilt - g_cfg.lyingStartDeg) / (g_cfg.lyingFullDeg - g_cfg.lyingStartDeg)) * thighFlat;
         // the installed level x the breast size, held per shape to the largest level that shape stays within the
-        // approved back slump's stretch at x2 (62%) on the base body (tests\size_stretch.py)
-        const float lv0 = level * v.size;
+        // approved back slump's stretch at x2 (62%) on the base body (tests\size_stretch.py; [Gravity]
+        // fMaxBack .. fMaxDown); a tuning file's [Breasts] fGravityLevel gives every body that level instead
+        const float over = Tune().part[kPartBreast].gravLevel;
+        const float lv0 = over > 0.0f ? over : level * v.size;
         auto capped = [&](float most) {   // (x the body's ceiling scale, 1 on the base body)
             const float m = (most < g_cfg.maxLevel ? most : g_cfg.maxLevel) * v.ceilScale;
             return lv0 > m ? m : lv0;
         };
-        const float lvBack = capped(kMaxLevelBack), lvSide = capped(kMaxLevelSide), lvHang = capped(kMaxLevelHang),
-                    lvDown = capped(kMaxLevelDown);
+        const float lvBack = capped(g_cfg.maxBack), lvSide = capped(g_cfg.maxSide), lvHang = capped(g_cfg.maxHang),
+                    lvDown = capped(g_cfg.maxDown);
         // per-bone shapes need the four breast bones; without them only the whole breast moves
         const bool haveBones = a.bones[0] && a.bones[1] && a.bones[2] && a.bones[3];
         const float s = haveBones ? g_cfg.slump : 0.0f;              // on the back
@@ -4517,11 +4565,12 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         "slump %.2f, fixed frame rate %d, spring gravity %.3f g",
         g_iniPath, g_cfg.enabled, g_cfg.hangCm, g_cfg.pressCm, g_cfg.deadZoneDeg, g_cfg.lyingStartDeg, g_cfg.lyingFullDeg,
         g_cfg.slump, g_cfg.fixedFrameRate, g_cfg.springGravity);
-    Log("shapes: side %.2f, face down %.2f, bent forward %.2f; spring gravity breast %.3f, belly %.3f, butt %.3f, thighs %.3f g; "
+    Log("shapes: side %.2f, face down %.2f, bent forward %.2f; their largest levels: back x%.2f, side x%.2f, bent forward "
+        "x%.2f, face down x%.2f; spring gravity breast %.3f, belly %.3f, butt %.3f, thighs %.3f g; "
         "size scaling %d (large %.2f, small %.2f, override %.2f, level x size at most %.2f); snapshots %d",
-        g_cfg.sideSlump, g_cfg.faceDownSquash, g_cfg.hangShape, g_cfg.springGravity, g_cfg.springGravityBelly,
-        g_cfg.springGravityButt, g_cfg.springGravityThighs, g_cfg.sizeScaling, g_cfg.sizeLarge, g_cfg.sizeSmall,
-        g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
+        g_cfg.sideSlump, g_cfg.faceDownSquash, g_cfg.hangShape, g_cfg.maxBack, g_cfg.maxSide, g_cfg.maxHang, g_cfg.maxDown,
+        g_cfg.springGravity, g_cfg.springGravityBelly, g_cfg.springGravityButt, g_cfg.springGravityThighs, g_cfg.sizeScaling,
+        g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
     Log("collisions %d (measure only %d): soft size x%.2f, largest push breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, "
         "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d)",
         g_cfg.collision, g_cfg.measureOnly, g_cfg.softScale, g_cfg.maxPush[0] * 100, g_cfg.maxPush[1] * 100, g_cfg.maxPush[2] * 100,

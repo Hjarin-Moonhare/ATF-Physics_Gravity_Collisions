@@ -14,15 +14,24 @@ again when one changed, so a file can be edited while the game runs.
 ## Levels
 
 A level gives a part a physics preset's springs, plus a swing on top. The springs are strength, damping ratio and
-MaxDist per COM axis, from `src\preset_data.h`, at the extra-jiggle level the body's records were installed with.
+MaxDist per COM axis, from `src\preset_data.h`, at the extra-jiggle level the body's records were installed with. The
+swing makes the level's strength: how far the breasts and butt move against Realistic, on the game's spring model
+(the largest offset per motion, walk, run, jump landing, sprint start/stop and strafe reversal at 60 fps, averaged).
 
-| Level | Springs | Swing |
+| Level | Springs | Strength (breasts and butt) |
 |---|---|---|
 | `Minimal` | Realistic | x0.25 |
 | `Lower` | Realistic | x0.5 |
-| `Realistic`, `Low`, `Medium`, `High`, `Max` | that preset | x1 |
+| `Realistic` | Realistic | x1 |
+| `Low`, `Medium`, `High`, `Max` | that preset | x1.25, x1.5, x2, x2.5 |
+| `Ultra` | Max | x3 |
 | `Off` | as installed | x0, and no sag |
-| `Preset` (also `Installed`, `Default`) | in a part's section: `[All]`'s level; in `[All]`: as installed | x1 |
+| `Preset` (also `Installed`, `Default`) | in a part's section: `[All]`'s level; in `[All]`: as installed | as installed |
+
+- **The other parts.** The presets give the belly, thighs, hips, calves, arms and torso a smaller share at the higher
+  levels. `bMatchLevel=1` brings a part to the level's strength too (`kLevelMatch`, per extra-jiggle level).
+- **Damping.** A level's swing is not in the damping: the damping is the preset's own, moved only by the body's
+  factors, `fSwing` and `fSettle`.
 
 - **Which setting is installed.** At load, each spring record is matched against the table. Strength, damping and
   MaxDist must agree to within 1e-4 (relative, above 1); the first preset and extra-jiggle level that fits is the
@@ -49,6 +58,9 @@ MaxDist per COM axis, from `src\preset_data.h`, at the extra-jiggle level the bo
 | Key | Range | What it does |
 |---|---|---|
 | `sLevel` | a level | the part's level; `Preset` = `[All]`'s |
+| `bMatchLevel` | 0 or 1 | 1 = the level's full strength for this part |
+| `fTravelLimit` | 0.5 to 3 | the farthest the part travels, x its Max physics + Max extra jiggle travel; left out: `kPartTravelLimit` |
+| `fGravityLevel` | 0 to 8 | `[Breasts]` only: every body's breast gravity level, in place of the installed level x the breast size; 0 = as installed |
 | `fSwing` | 0 to 3 | x the part's swing |
 | `fUpDown`, `fSideToSide`, `fFrontBack` | 0 to 3 | x the swing on one COM axis: vertical, side, fore/aft |
 | `fSettle` | 0.25 to 4 | x the damping ratio: above 1 it settles sooner, below 1 it wobbles longer |
@@ -105,13 +117,13 @@ game starts.
 
 ## A spring's swing and damping
 
-- **The swing** = the body's jiggle factor (body shape, character, outfit) x the level's swing x `fSwing` x the bone's
-  factor x the axis factor.
-- **Above 1,** the swing stops at the part's ceiling: the travel of Max physics with Max extra jiggle, over the
-  spring's travel as tuned.
+- **The swing** = the body's jiggle factor (body shape, character, outfit) x the level's swing (x `kLevelMatch` with
+  `bMatchLevel`) x `fSwing` x the bone's factor x the axis factor.
+- **Every axis** stops at the part's ceiling: the travel of Max physics with Max extra jiggle x the part's travel
+  limit, over the spring's travel as tuned. A limit below the travel holds the swing below 1 too.
 - **No sag** goes into an axis whose swing is under 0.05.
-- **The damping ratio** = the level's x the jiggle coupling (`[BodyShape] fJiggleDamping`) x `fSettle`. It never
-  drops below the release's lowest for that bone, and never goes above critical.
+- **The damping ratio** = the level's x the jiggle coupling (`[BodyShape] fJiggleDamping`, on the body's factors
+  and `fSwing`) x `fSettle`. It never drops below the release's lowest for that bone, and never goes above critical.
 
 ## The reads behind it
 
@@ -128,3 +140,17 @@ game starts.
   and no lock, so a list changing under it gives one wrong answer, for 2 s at most.
 - **Failed checks.** A read whose check fails is off, and the log's tuning line says which passed.
 - **The planet's gravity** is the player's, kept for every body (the bodies loaded are near the player).
+
+## Gravity's largest levels (TFPhysics.ini)
+
+| Key | Default | What it does |
+|---|---|---|
+| `[Gravity] fMaxBack` | 2.0 | the largest effective level (installed level x breast size, or `fGravityLevel`) of the shape lying on the back |
+| `[Gravity] fMaxSide` | 2.4 | ... lying on a side |
+| `[Gravity] fMaxHang` | 2.3 | ... bent forward, and on all fours |
+| `[Gravity] fMaxDown` | 3.0 | ... lying face down |
+| `[Size] fMaxLevel` | 3.0 | the effective level never goes above this (0.5 to 8) |
+
+Each is 0.5 to 8, and the stretch guard scales them down for a body whose breast skin stretches more than the base
+body's. On A-Body's mesh the skin first folds above x3.5 lying on the back or on a side, above x5.75 bent forward or
+on all fours (with the springs' own sag at its most on top), and above x6 face down.

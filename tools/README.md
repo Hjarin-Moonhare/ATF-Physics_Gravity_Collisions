@@ -69,7 +69,7 @@ of this package:
 
 | Variable | The folder | Used by |
 |---|---|---|
-| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` and `gen_preset_data.py` |
+| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `p3_spring_sim.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` |
 | `ABODY_AUDIT` | A-Body's build tree, with the physics preset and jiggle tables | `gen_body_shape_data.py`, `gen_preset_data.py` |
 
 `natural_rest.py` also reads `reports\phase3\physics\collision\sizes.json` from the build tree that A-Body's `v06.py`
@@ -196,8 +196,10 @@ wrote ...\src\body_shape_data.h: 50 bones {'breast': 8, 'butt': 8, 'belly': 4, '
 
 For each of A-Body's 50 spring bones, the springs of every installer setting (5 physics presets × 3 extra-jiggle
 levels), per COM axis as the record stores them: strength, damping ratio and MaxDist. It also lists the levels a part
-can be given: Minimal and Lower (Realistic's springs with a quarter and half its swing), then the five presets. It
-reads the same tables as `gen_body_shape_data.py` and stops if their bone lists differ.
+can be given, Minimal to Ultra, with the swing that gives each its strength: it runs every table on A-Body's spring
+model (`p3_spring_sim.py`: walk, run, jump landing, sprint start/stop, strafe reversal at 60 fps), sets each level's
+swing on the breasts and butt, and writes each part's factor to reach the level too (`kLevelMatch`). It reads the
+same tables as `gen_body_shape_data.py` and stops if their bone lists differ.
 
 The plugin matches each spring record against these values to find the installed setting, and writes a level's
 springs into the record when a tuning file gives a part that level.

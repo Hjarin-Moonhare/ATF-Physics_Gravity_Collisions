@@ -154,3 +154,9 @@ the code does instead.
   damping and sub-step rate.
 - Fix: a record once tuned is written on every update from its springs as tuned. Untuned, those are the installed
   values, bit for bit.
+
+**25. A level's swing stays out of the damping.**
+- Breaks: the extra swing that gives a level its number would also loosen its damping, so the level would move more
+  than its number and settle later than its preset.
+- Fix: a level is its preset's springs as they are, with the swing on top. Only the body's factors, `fSwing` and
+  `fSettle` move the damping.

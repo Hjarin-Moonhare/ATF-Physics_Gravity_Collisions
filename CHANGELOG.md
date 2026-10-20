@@ -4,6 +4,13 @@ Releases are the builds A-Body ships.
 
 ## Development (this source)
 
+- **Even steps** for the tuning levels: Minimal x0.25, Lower x0.5, Realistic, Low x1.25, Medium x1.5, High x2, Max x2.5
+  and Ultra x3 of Realistic's movement, each a preset's springs with the swing that makes its number (`kLevelSwing`).
+  A level's swing no longer moves the damping.
+- **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
+- **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
+- **Gravity:** the shapes' largest levels are `[Gravity] fMaxBack`, `fMaxSide`, `fMaxHang` and `fMaxDown`; `[Size]
+  fMaxLevel` goes up to 8; a tuning file's `[Breasts] fGravityLevel` sets every body's breast gravity level.
 - **Tuning files** (`Data\SFSE\Plugins\TFPhysics\*.ini`, every build; [docs/TUNING.md](docs/TUNING.md)):
   - each of the 8 parts takes any physics preset's springs at the installed extra jiggle, Lower or Minimal
     (Realistic's with half and a quarter of the swing), or Off;

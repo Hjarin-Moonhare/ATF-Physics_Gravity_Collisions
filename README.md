@@ -16,10 +16,12 @@ match, it patches nothing and says why in its log.
 - Gravity inside the breast, belly and butt springs.
 - Breast size, the body triangle (thin / muscular / heavy) and the part sliders scale jiggle and gravity per part, with
   a stretch guard so small or thin breasts don't overstretch.
-- Tuning files: each of the 8 parts (breasts, butt, belly, thighs, hips, calves, arms, torso) can take any physics
-  preset's springs, or Lower and Minimal (Realistic's with half and a quarter of the swing), with its own swing, per
-  direction and per bone, settle, bounce speed and sag. Factors per character, per outfit and for the planet's
-  gravity go on top. The files are read again while the game runs. See [docs/TUNING.md](docs/TUNING.md).
+- Tuning files: each of the 8 parts (breasts, butt, belly, thighs, hips, calves, arms, torso) can take a level in
+  even steps of Realistic's movement (Minimal x0.25, Lower x0.5, Realistic, Low x1.25, Medium x1.5, High x2, Max x2.5,
+  Ultra x3), its own travel limit, swing, per direction and per bone, settle, bounce speed and sag. Factors per
+  character, per outfit and for the planet's gravity go on top. The files are read again while the game runs. See
+  [docs/TUNING.md](docs/TUNING.md).
+- The gravity shapes' largest levels are settings, and the breast gravity level can be set for every body.
 - Collisions:
   - upper arms, forearms, hands and thighs push the breasts;
   - forearms, hands and thighs push the belly;
@@ -67,8 +69,9 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
   - collisions on A-Body's skeleton in ten poses, other and dead bodies;
   - the world proxies, against stand-ins for the game's Havok functions;
   - gravity and body shape;
-  - the tuning files: each level against the preset table, back to the installed springs bit for bit, the
-    multipliers, characters, outfits, the planet, the files read again;
+  - the tuning files: each level against the preset table, Ultra, the match, the travel limits, back to the
+    installed springs bit for bit, the multipliers, characters, outfits, the planet, the files read again;
+  - the gravity shapes' largest levels from the INI, and a breast gravity level for every body;
   - the Address Library reader, and every start-up check on a fake game image.
 
   If it finds the game (through `STARFIELD_DIR`, or the usual Steam folders), it also runs the checks on the real

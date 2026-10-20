@@ -170,6 +170,24 @@ int main() {
     Check("x2 x size 1.5: teardrop held x2.3", r, kBentOver, bent, 2.0f, 1.5f, nullptr, 2.3f);
     Check("x2 x size 1.5: face down x3.0", r, kFaceDown, down, 2.0f, 1.5f, nullptr, 3.0f);
     Check("x2 x size 0.5 (Small): x1.0", r, kBentOver, bent, 2.0f, 0.5f);
+    // the shapes' largest levels from the INI ([Gravity] fMaxBack .. fMaxDown, [Size] fMaxLevel up to 8), and
+    // a tuned level for every body ([Breasts] fGravityLevel): it replaces the installed level x the size, and each
+    // shape still stops at its largest level
+    {
+        const Settings keep = g_cfg;
+        g_cfg.maxBack = g_cfg.maxSide = g_cfg.maxHang = g_cfg.maxDown = 6.0f;
+        g_cfg.maxLevel = 6.0f;
+        Check("largest levels x6: x2 x 1.5 = x3", r, kOnBack, back, 2.0f, 1.5f, nullptr, 3.0f);
+        TuneSettings& tuned = g_tunes[g_tuneNow.load()];
+        tuned = TuneSettings{};
+        tuned.part[kPartBreast].gravLevel = 5.0f;
+        Check("tuned level x5: slump x5", r, kOnBack, back, 1.0f, 1.0f, nullptr, 5.0f);
+        Check("tuned level x5: side x5", r, kOnLeft, left, 1.0f, 1.0f, nullptr, 5.0f);
+        Check("tuned x5, size 0.5: teardrop x5", r, kBentOver, bent, 1.0f, 0.5f, nullptr, 5.0f);
+        g_cfg = keep;
+        Check("tuned x5, largest 2.0: held x2.0", r, kOnBack, back, 1.0f, 1.0f, nullptr, 2.0f);
+        tuned = TuneSettings{};
+    }
 
     const Vec3 thighDown = {0, 0, -1}, thighFlat = {0, 1, 0};
     Check("all fours: hang, not squash", r, kFaceDown, bent, 1.0f, 1.0f, &thighDown);
@@ -419,7 +437,8 @@ int main() {
         FILE* f1 = nullptr;
         fopen_s(&f1, ini, "wb");
         fputs("[Gravity]\r\nfHangCm=-3\r\nfPressCm=99\r\nfDeadZoneDeg=95\r\nfLyingStartDeg=80\r\nfLyingFullDeg=20\r\n"
-              "fThighFlatStartDeg=200\r\nfThighFlatFullDeg=-5\r\nfSlump=abc\r\nfSideSlump=9\r\n[Springs]\r\nfSpringGravity=-1\r\n"
+              "fThighFlatStartDeg=200\r\nfThighFlatFullDeg=-5\r\nfSlump=abc\r\nfSideSlump=9\r\nfMaxBack=99\r\nfMaxSide=-3\r\n"
+              "fMaxHang=abc\r\nfMaxDown=nan\r\n[Springs]\r\nfSpringGravity=-1\r\n"
               "fSpringGravityBelly=7\r\n[Size]\r\nfLarge=50\r\nfMaxLevel=99\r\n[Collision]\r\nfMaxPushBreastCm=-4\r\n"
               "fMaxPushGluteCm=55\r\nfMaxPushOtherCm=-4\r\nfDeadMaxAgeMs=99999\r\n", f1);
         fclose(f1);
@@ -427,7 +446,8 @@ int main() {
         const Settings& c = g_cfg;
         bool ok = c.hangCm == 0 && c.pressCm == 5 && c.deadZoneDeg == 60 && c.lyingFullDeg > c.lyingStartDeg &&
                   c.thighFlatFullDeg > c.thighFlatStartDeg && c.thighFlatFullDeg <= 90 && c.slump == 0 && c.sideSlump == 1.5f &&
-                  c.springGravity == 0 && c.springGravityBelly == 0.3f && c.sizeLarge == 2 && c.maxLevel == 3 &&
+                  c.springGravity == 0 && c.springGravityBelly == 0.3f && c.sizeLarge == 2 && c.maxLevel == 8 &&
+                  c.maxBack == 8 && c.maxSide == 0.5f && c.maxHang == 0.5f && c.maxDown == 0.5f &&
                   c.maxPush[0] == 0 && std::fabs(c.maxPush[3] - 0.10f) < 1e-7f && c.maxPushOther == 0 && c.deadMaxAge == 1.0f;
         // and the gravity math stays finite with them, in every orientation
         bool finite = true;

@@ -74,7 +74,8 @@ the rest pose).
 - **Every gravity shape** on both sides, against the design's offsets: standing, lying on the back, on the left and
   right sides, face down, bent forward on the feet, and on all fours against lying with the thighs flat.
 - **The shape ceilings** at x2 with breast size ×1.5: back ×2.0, side ×2.4, bent forward ×2.3, face down ×3.0. Small
-  breasts stay at ×1.0.
+  breasts stay at ×1.0. With the largest levels set to ×6, the slump reaches ×3; a tuned breast gravity level of ×5
+  gives every body ×5 whatever its size, and each shape still stops at its largest level.
 - **Shapes off:** with the side shape off, only the slide; with the teardrop off, the hang at 1.2.
 - **Spring gravity** per part.
 - **The breast size** from the sliders on a fake character record, and ×1 without a character.
@@ -108,7 +109,8 @@ Body-shape physics, against numbers worked out from the design, not from the plu
   - bounce speed, settle, Lower, Minimal and Off; `[All]` with one part on its own;
   - per direction and per bone; a swing past Max held at the part's ceiling;
   - sag per part; characters, outfits (the lowest factor of the pieces worn) and the planet;
-  - the files: five read in name order, garbage held in range, and read again after a change.
+  - the files: five read in name order, garbage held in range, and read again after a change;
+  - Ultra (Max's springs, its own swing, Max's damping), a part matched to its level, and a travel limit below 1.
 
 ## tune_dump.cpp
 

@@ -32,8 +32,10 @@ int main(int argc, char** argv) {
     printf("all %s\n", LevelText(t.allLevel));
     for (int p = 0; p < kNumParts; ++p) {
         const PartTune& pt = t.part[p];
-        printf("part %s level %s swing %.4f side %.4f frontback %.4f updown %.4f settle %.4f bounce %.4f sag %.4f\n",
-               kPartSection[p], LevelText(pt.level), pt.swing, pt.dir[0], pt.dir[1], pt.dir[2], pt.settle, pt.bounce, pt.sag);
+        printf("part %s level %s match %d swing %.4f side %.4f frontback %.4f updown %.4f settle %.4f bounce %.4f sag %.4f "
+               "limit %.4f gravity %.4f\n",
+               kPartSection[p], LevelText(pt.level), pt.match ? 1 : 0, pt.swing, pt.dir[0], pt.dir[1], pt.dir[2], pt.settle,
+               pt.bounce, pt.sag, pt.limit, pt.gravLevel);
     }
     for (int b = 0; b < kNumPresetBones; ++b)
         if (t.bone[b] != 1.0f) printf("bone %s %.4f\n", kPresetBones[b].name, t.bone[b]);

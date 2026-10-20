@@ -55,14 +55,16 @@ reset (slot 2) when it isn't. Three call sites call that loop:
    `TESNPC+0x448` and the body triangle at `+0x350`; for the tuning, the character's form IDs, what it wears and the
    player's gravity scale. Cached per body and read again every 2 s.
 3. `PreUpdate`, before the game's own update:
-   - a tuned part's springs (strength, MaxDist) go into its records, with the instance's sub-step rate;
+   - a tuned part's springs (strength, MaxDist) go into its records, with the instance's sub-step rate (a level's swing
+     stays out of the damping);
    - each spring's MaxDist is set so its cap is the 60 fps size;
    - gravity goes into each spring's velocity;
    - damping follows the body shape and the tuning.
 4. **The game's own loop.** The springs and correctives run.
 5. `PostUpdate`:
    - the breast anchors follow the chest's world tilt, with the dead zone, lying, side and face-down detection, the
-     thigh check and the per-bone shapes on top of the springs;
+     thigh check and the per-bone shapes on top of the springs, each shape held at its largest level
+     (`[Gravity] fMaxBack` .. `fMaxDown`);
    - `ScaleJiggle` scales each spring's swing by the body shape and the tuning;
    - `Collide` pushes the soft bones;
    - `AddOnTopAll` writes the per-bone results;

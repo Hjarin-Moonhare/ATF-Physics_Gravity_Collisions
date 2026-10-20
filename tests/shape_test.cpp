@@ -958,6 +958,97 @@ int main() {
             g_tuneNow = 0;
         }
     }
+    // ================================================================ even steps, Ultra, the match, the limit
+    // Written out from the design: Ultra is Max's springs with its own swing (kLevelSwing); a level's swing stays out
+    // of the damping, so the instance's damping is the preset's own (2 sqrt(strength) x ratio, at a neutral body);
+    // bMatchLevel multiplies a part's swing by its factor (kLevelMatch); every axis is held at the part's ceiling,
+    // the release's largest travel x the travel limit (fTravelLimit, else kPartTravelLimit) over the travel as tuned,
+    // also below 1.
+    {
+        static float dt9b = 1.0f / 60;
+        g_addr[kFrameTime] = reinterpret_cast<std::uintptr_t>(&dt9b);
+        g_cfg = Settings{};
+        g_cfg.collision = false;
+        TuneSettings& T = g_tunes[g_tuneNow.load()];
+        auto tune = [&](auto edit) {
+            T = TuneSettings{};
+            edit(T);
+            TuneFlags(T);
+        };
+        auto bone = [](const char* name) {
+            for (int b = 0; b < kNumPresetBones; ++b)
+                if (!strcmp(kPresetBones[b].name, name)) return b;
+            return -1;
+        };
+        const float zero[3] = {0, 0, 0};
+        char* com9b = NewNode("COM");
+        char* pecs9b = NewNode("L_Pecs");
+        const PresetSpring& gr = kPresetBones[bone("TF_Glute_Lower_L")].s[0][0];
+        const PresetSpring& gx = kPresetBones[bone("TF_Glute_Lower_L")].s[4][0];
+        const PresetSpring& tr = kPresetBones[bone("TF_Thigh_Rear_L")].s[0][0];
+        const PresetSpring& tx = kPresetBones[bone("TF_Thigh_Rear_L")].s[4][0];
+        Spring g = NewSpring(com9b, pecs9b, "TF_Glute_Lower_L", gr.maxDist, gr.strength, gr.damping, zero);
+        Spring th = NewSpring(com9b, pecs9b, "TF_Thigh_Rear_L", tr.maxDist, tr.strength, tr.damping, zero);
+        const float out[3] = {0.004f, -0.002f, 0.006f};
+        auto run = [&](Spring& s, float got[3]) {   // the spring writes `out`; what the plugin made of it, per axis
+            memcpy(s.target + 0x70, out, 12);
+            ActorView v;
+            v.com = com9b;
+            v.springs[v.nSprings++] = s.inst;
+            PreUpdate(v);
+            memcpy(s.target + 0x70, out, 12);
+            PostUpdate(v, 1);
+            const float* t = reinterpret_cast<const float*>(s.target + 0x70);
+            for (int k = 0; k < 3; ++k) got[k] = t[k] / out[k];
+        };
+        auto want = [](const Spring& s, const float* travel, float lim, float swing, float w[3]) {
+            const SpringInfo* info = SpringInfoFor(s.data, s.target);
+            for (int k = 0; k < 3; ++k) {
+                const float c = info->maxTravel[k] * lim / travel[k];
+                w[k] = swing < c ? swing : c;
+            }
+        };
+        auto near3 = [](const float* a, const float* b) {
+            return std::fabs(a[0] - b[0]) < 1e-4f && std::fabs(a[1] - b[1]) < 1e-4f && std::fabs(a[2] - b[2]) < 1e-4f;
+        };
+        float got[3], w[3];
+        {   // Ultra on the butt: Max's springs, Ultra's swing, held at the butt's ceiling; the damping Max's own
+            tune([](TuneSettings& t) { t.part[kPartButt].level = kLevelUltra; });
+            run(g, got);
+            want(g, gx.maxDist, kPartTravelLimit[kPartButt], kLevelSwing[kLevelUltra], w);
+            const float* rs = reinterpret_cast<const float*>(g.data + 0x20);
+            const float* c = reinterpret_cast<const float*>(g.inst + 0xC0);
+            bool damp = true;
+            for (int k = 0; k < 3; ++k) damp &= std::fabs(c[k] - 2.0f * std::sqrt(gx.strength[k]) * gx.damping[k]) < 1e-5f;
+            snprintf(d, sizeof(d), "x%.3f x%.3f x%.3f (want x%.3f x%.3f x%.3f), Max's springs %d, Max's damping %d", got[0], got[1],
+                     got[2], w[0], w[1], w[2], rs[2] == gx.strength[2], damp);
+            Report("Ultra on the butt", d, near3(got, w) && rs[0] == gx.strength[0] && rs[2] == gx.strength[2] && damp);
+        }
+        {   // the thigh matched to Max: Max's swing x the thigh's factor (extra jiggle None)
+            tune([](TuneSettings& t) {
+                t.part[kPartThigh].level = kLevelMax;
+                t.part[kPartThigh].match = true;
+            });
+            run(th, got);
+            want(th, tx.maxDist, kPartTravelLimit[kPartThigh], kLevelSwing[kLevelMax] * kLevelMatch[kLevelMax][0][kPartThigh], w);
+            snprintf(d, sizeof(d), "x%.3f x%.3f x%.3f (want x%.3f x%.3f x%.3f; the factor x%.3f)", got[0], got[1], got[2], w[0], w[1],
+                     w[2], kLevelMatch[kLevelMax][0][kPartThigh]);
+            Report("the thigh matched to Max", d, near3(got, w) && kLevelMatch[kLevelMax][0][kPartThigh] > 1.0f);
+        }
+        {   // a travel limit of 0.5 on the butt at Realistic: the axes whose ceiling falls below 1 are held below 1
+            tune([](TuneSettings& t) {
+                t.part[kPartButt].level = kLevelRealistic;
+                t.part[kPartButt].limit = 0.5f;
+            });
+            run(g, got);
+            want(g, gr.maxDist, 0.5f, 1.0f, w);
+            snprintf(d, sizeof(d), "x%.3f x%.3f x%.3f (want x%.3f x%.3f x%.3f)", got[0], got[1], got[2], w[0], w[1], w[2]);
+            Report("a travel limit below 1", d, near3(got, w) && (w[0] < 1.0f || w[1] < 1.0f || w[2] < 1.0f));
+        }
+        T = TuneSettings{};
+        TuneFlags(T);
+    }
+
     FlushLog();
     printf("%s\n", g_fails ? "SOME CASES FAILED" : "all cases passed");
     return g_fails;
