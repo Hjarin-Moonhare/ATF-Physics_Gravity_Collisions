@@ -16,6 +16,10 @@ match, it patches nothing and says why in its log.
 - Gravity inside the breast, belly and butt springs.
 - Breast size, the body triangle (thin / muscular / heavy) and the part sliders scale jiggle and gravity per part, with
   a stretch guard so small or thin breasts don't overstretch.
+- Tuning files: each of the 8 parts (breasts, butt, belly, thighs, hips, calves, arms, torso) can take any physics
+  preset's springs, or Lower and Minimal (Realistic's with half and a quarter of the swing), with its own swing, per
+  direction and per bone, settle, bounce speed and sag. Factors per character, per outfit and for the planet's
+  gravity go on top. The files are read again while the game runs. See [docs/TUNING.md](docs/TUNING.md).
 - Collisions:
   - upper arms, forearms, hands and thighs push the breasts;
   - forearms, hands and thighs push the belly;
@@ -27,7 +31,7 @@ match, it patches nothing and says why in its log.
 ## Status
 
 - TF Physics 1.3 ships in A-Body 1.5. It's the `build_release_collisions.bat` build.
-- This source is 1.3 plus the world-collision work in the logging build.
+- This source is 1.3 plus the tuning files (every build) and the world-collision work (logging build).
 - It was read from Starfield 1.16.244. SFSE loads it on any game version that has an Address Library database, and
   the start-up checks decide whether it runs.
 
@@ -63,10 +67,14 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
   - collisions on A-Body's skeleton in ten poses, other and dead bodies;
   - the world proxies, against stand-ins for the game's Havok functions;
   - gravity and body shape;
+  - the tuning files: each level against the preset table, back to the installed springs bit for bit, the
+    multipliers, characters, outfits, the planet, the files read again;
   - the Address Library reader, and every start-up check on a fake game image.
 
   If it finds the game (through `STARFIELD_DIR`, or the usual Steam folders), it also runs the checks on the real
   `Starfield.exe`, read only.
+- **`tests\tune_dump.exe <TFPhysics.ini>`** (built by `run_tests.bat`): how a TFPhysics.ini and its tuning files
+  are read, with the plugin's own reader.
 - **`tests\run_stress.bat`:** many bodies on 11 threads, the memory guards, and the cost per body.
 - **`tests\run_analyze.bat`:** MSVC `/analyze`. 30 known warnings.
 
@@ -74,17 +82,17 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
 
 1. Install A-Body.
 2. Replace `Data\SFSE\Plugins\TFPhysics.dll` with yours. For the logging build, also replace `TFPhysics.ini` with
-   `config\TFPhysics.ini`.
+   `config\TFPhysics.ini`. Tuning files go in `Data\SFSE\Plugins\TFPhysics\` ([docs/TUNING.md](docs/TUNING.md)).
 3. Play, then read `Documents\My Games\Starfield\SFSE\Logs\TFPhysics.log`.
 
 ## Layout
 
 | Folder | What's in it |
 |---|---|
-| `src\` | `plugin.cpp`, plus two generated data headers: collision sizes and body-shape limits. |
+| `src\` | `plugin.cpp`, plus three generated data headers: collision sizes, body-shape limits and the physics presets' springs. |
 | `tests\` | The offline tests, A-Body's skeleton in ten poses (`tests\cases\`), and the scripts that run them. |
 | `config\` | The logging build's INI, and A-Body 1.5's release INIs (Fixed and Variable presets). |
-| `docs\` | The design rules, how it works, the engine notes, the body requirements and world collision. `docs\research\` holds the game facts behind them, with the hard risks. |
+| `docs\` | The design rules, how it works, the engine notes, the body requirements, the tuning files and world collision. `docs\research\` holds the game facts behind them, with the hard risks. |
 | `tools\` | `vcvars.bat` for the scripts, `package_build.py`, `re\` (read-only tools for `Starfield.exe`), and the scripts that measured the data headers (they need A-Body's own build tools). See `tools\README.md`. |
 
 ## How it works, in short
@@ -93,11 +101,12 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
    those calls at small thunks that pass the character along and call the original in between.
 2. **Before the game's update,** for an A-Body body:
    - each spring's travel limit is set to its 60 fps size;
+   - a tuned part's springs go into its spring records;
    - gravity is added to the springs' velocities;
-   - damping follows the body shape.
+   - damping follows the body shape and the tuning.
 3. **After it:**
    - the breast anchors follow the chest's tilt, with per-bone shapes;
-   - the jiggle is scaled per part;
+   - the jiggle is scaled per part (body shape and tuning);
    - collisions push the soft bones.
 
    Writes go where the game's own setter writes: the node's local transform and the rig's copy.

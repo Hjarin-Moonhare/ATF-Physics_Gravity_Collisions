@@ -17,9 +17,12 @@ each Address Library ID. This page is the map.
      change whenever code moves.
    - `CheckSizeReading`: the morph-table code.
    - `CheckDeadReading`: `Actor::IsDead`, slot 269 of both character vtables.
+   - `ResolveTuneAddresses`: the three reads behind the tuning files (the player's gravity scale, a form's ID, what a
+     character wears), each by the bytes of the game function that reads it. A read whose check fails is off.
    - `ResolveWorldAddresses` (logging build, `[World]` on): the collision object and world classes by RTTI name, the
      two Havok-side functions it calls, and the getters of the motion tables.
-5. **The hooks go in** (`InstallHooks`), only if everything passed. Otherwise nothing is patched and the log says why.
+5. **The tuning files are read** (`LoadTuning`, [TUNING.md](TUNING.md)).
+6. **The hooks go in** (`InstallHooks`), only if everything passed. Otherwise nothing is patched and the log says why.
 
 ## The hook
 
@@ -43,21 +46,24 @@ reset (slot 2) when it isn't. Three call sites call that loop:
 
 **`Hooked<Site>`, per call:**
 
+0. `MaybeReloadTuning`: every 2 s the first thread through checks the tuning files, and reads them again on a change.
 1. `Collect`: walk the modifier list (`BoneModifierExtra` +0x28, instance +0x08 next).
    - A body is "ours" when the list holds TF Physics' face-up gravity correctives: PoseDeformers on `L_Pecs` /
      `R_Pecs` driven by `COM`, recognised by their record values (`IsOurFaceUpRecord`).
    - Its springs are the SpringBones driven by the same `COM`.
 2. `BodyFactorsOf`: the body's size and shape, from its NPC record (`actor+0x98`). It reads the morph-weight table at
-   `TESNPC+0x448` and the body triangle at `+0x350`. Cached per body and read again every 2 s.
+   `TESNPC+0x448` and the body triangle at `+0x350`; for the tuning, the character's form IDs, what it wears and the
+   player's gravity scale. Cached per body and read again every 2 s.
 3. `PreUpdate`, before the game's own update:
+   - a tuned part's springs (strength, MaxDist) go into its records, with the instance's sub-step rate;
    - each spring's MaxDist is set so its cap is the 60 fps size;
    - gravity goes into each spring's velocity;
-   - damping follows the body shape.
+   - damping follows the body shape and the tuning.
 4. **The game's own loop.** The springs and correctives run.
 5. `PostUpdate`:
    - the breast anchors follow the chest's world tilt, with the dead zone, lying, side and face-down detection, the
      thigh check and the per-bone shapes on top of the springs;
-   - `ScaleJiggle` scales each spring's swing by the body shape;
+   - `ScaleJiggle` scales each spring's swing by the body shape and the tuning;
    - `Collide` pushes the soft bones;
    - `AddOnTopAll` writes the per-bone results;
    - `Share` publishes this body's shapes for the bodies near it.
@@ -88,11 +94,12 @@ main thread. All state is per body, keyed by game pointers:
 
 | Table | Key | Holds | Locking |
 |---|---|---|---|
-| `g_springInfo` (2048) | `SpringBoneData*` | original MaxDist, part, side, bone, body-shape ceilings, damping floors | reads lock-free; adding takes a mutex; an entry is published whole |
+| `g_springInfo` (2048) | `SpringBoneData*` | original springs, the installer setting they match, part, side, bone, body-shape ceilings, damping floors | reads lock-free; adding takes a mutex; an entry is published whole |
 | Bone states (16384) | node | written / added offsets | `BoneLock`, held briefly |
 | Body nodes | `COM` | every bone the collisions use, found once by name | a mutex on insert; checked again by name pointer |
 | Factors | 3D root | size, shape and stretch-guard factors | 4-way cache |
 | Other bodies (128) | `COM` | copied shapes, centre, velocity, time | seqlock: readers skip odd or stale entries and shift by velocity × age |
+| `g_tunes` (2) | none | what the tuning files say | two copies: a reload fills the one not in use, then switches (`g_tuneNow`, release / acquire); one reload at a time (`g_tuneBusy`) |
 
 **Counters** are relaxed atomics. The log is a queue drained by its own thread, with the file kept open, so a worker
 thread never waits on disk.
@@ -139,7 +146,8 @@ bodies are kept up to `fDeadMaxAgeMs` old while they lie still.
 | `TFP_RELEASE` | false | false | gravity, springs, body shape |
 | `TFP_RELEASE` + `TFP_RELEASE_COLLISIONS` | false | true | the above + collisions between bodies (A-Body 1.5) |
 
-The release builds also force the world collision and the snapshots off, whatever the INI says.
+The release builds also force the world collision and the snapshots off, whatever the INI says. The tuning files work
+in every build.
 
 ## The log (logging build)
 

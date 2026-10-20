@@ -7,7 +7,7 @@ under Git Bash `find` is the Unix one.
 
 | Script | Builds and runs | Output in | Time |
 |---|---|---|---|
-| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `addrlib_test` | `build\tests` | about 20 s |
+| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `tune_dump` (on `config\TFPhysics.ini`), `addrlib_test` | `build\tests` | about 30 s |
 | `run_stress.bat` | `stress_test`, as the logging build | `build\tests` | about 15 s |
 | `run_stress_release_collisions.bat` | `stress_test`, as the release with collisions | `build\tests_relcol` | about 15 s |
 | `run_ini_check_release_collisions.bat` | `ini_check_release_collisions`, on both release INIs | `build\ini_check` | about 5 s |
@@ -22,8 +22,8 @@ suite that fails.
 arms_crossed                                             8 bones pushed, largest 5.00 cm, worst difference 0.003 cm (TF_Breast_Outer_R)  OK
 ```
 
-CMake runs the same five suites as `run_tests.bat` and `run_stress.bat`: `ctest --test-dir build/cmake -C Release`
-(see the main README).
+CMake runs the same programs as `run_tests.bat` and `run_stress.bat`: `ctest --test-dir build/cmake -C Release` (see
+the main README).
 
 ## collide_test.cpp
 
@@ -99,6 +99,32 @@ Body-shape physics, against numbers worked out from the design, not from the plu
   a frame, two instances on one bone, a neutral body left alone.
 - **The stretch guard:** the strain per body, the shape ceilings scaled by it, and the breast springs' gravity held.
 - **Settings:** the shipped INI's `[BodyShape]` keys, and garbage `[BodyShape]` values (NaN taken as the low end).
+- **Tuning each part,** written out from the design ([../docs/TUNING.md](../docs/TUNING.md)):
+  - the installer setting a record was built with, found from its values, and a record no setting matches;
+  - a part at a level: the level's strength and MaxDist in the record, the damping and the sub-step rate per instance,
+    against the preset table;
+  - back as installed: bit for bit the constructor's values;
+  - another body's record at a level keeps its own springs;
+  - bounce speed, settle, Lower, Minimal and Off; `[All]` with one part on its own;
+  - per direction and per bone; a swing past Max held at the part's ceiling;
+  - sag per part; characters, outfits (the lowest factor of the pieces worn) and the planet;
+  - the files: five read in name order, garbage held in range, and read again after a change.
+
+## tune_dump.cpp
+
+Prints how TF Physics reads a TFPhysics.ini's `[Tuning]` section and the tuning files next to it, with the plugin's
+own reader, one line per setting. Part of what it prints:
+
+```
+build\tests\tune_dump.exe "C:\Games\Starfield\Data\SFSE\Plugins\TFPhysics.ini"
+files 2 All.ini, Breasts.ini
+all Medium
+part Breasts level Off swing 1.0000 side 1.0000 frontback 1.0000 updown 1.0000 settle 1.0000 bounce 1.0000 sag -1.0000
+outfit [Spacesuit] form 00000000 slots 35 | Breasts 0.5000 Butt 0.6000 ...
+```
+
+`sag -1` means the part's sag comes from TFPhysics.ini's `[Springs]`. A key that doesn't show its value was not read:
+a typo in its name, or a comment after its value.
 
 ## addrlib_test.cpp
 
@@ -114,9 +140,11 @@ Body-shape physics, against numbers worked out from the design, not from the plu
   - the frame-time load (8 of 8);
   - a call site (15 of 15: not a call, or a call elsewhere, which is another mod's hook);
   - the size reading (29 of 29) and the triangle reading (20 of 20);
-  - the character's register blocks, where only that path loses its character and the hooks still go in.
+  - the character's register blocks, where only that path loses its character and the hooks still go in;
+  - the tuning's three reads (53 of 53: the gravity scale 6, the form ID 5, the worn items 42), each change turning
+    off only its own read.
 
-  An unreadable address fails the check without a crash.
+  An unreadable address fails the check without a crash, and a tuning read outside the image turns all three off.
 - **With the game:** the real database (every ID found, and 25 of 25 equal the known 1.16.244 RVAs), refused while
   another game version runs, the 1.16.242 and 1.16.236 databases, and every check on the real `Starfield.exe`, read
   only.

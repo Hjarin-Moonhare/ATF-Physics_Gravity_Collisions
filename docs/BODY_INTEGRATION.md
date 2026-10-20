@@ -56,6 +56,9 @@ The numbers are A-Body's, measured from its mesh and skeleton (the scripts are i
   - the natural-pose distance of every soft-bone and limb pair, below which nothing pushes.
 - **`src\body_shape_data.h`:** each spring's part, its largest travel (the release's Max physics with Max jiggle) and
   its lowest damping ratio.
+- **`src\preset_data.h`:** each spring's strength, damping ratio and MaxDist at every installer setting (5 physics
+  presets x 3 extra-jiggle levels). The plugin finds a body's installed setting from it, and the tuning files'
+  levels give a part those springs ([TUNING.md](TUNING.md)).
 - **The gravity shapes** in `plugin.cpp` (the back slump, side, face-down and teardrop tables): offsets for the four
   breast bones, designed on A-Body's mesh to keep the skin stretch under a limit.
 
@@ -85,6 +88,7 @@ What's A-Body-specific today, and what a data-driven version would need:
    - sphere radii and caps;
    - rest distances, or a rule that derives them from the skeleton's reference pose at runtime;
    - part membership and travel ceilings;
+   - the springs of each of its installer settings, for the tuning levels;
    - the gravity shapes per bone.
 2. **A detection rule** that isn't A-Body's corrective. For example, the definition's bones plus springs driven by
    COM, or a list of races and skeletons.

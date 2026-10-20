@@ -7,7 +7,7 @@ Run everything from the package folder, the one with `build.bat`.
 | `vcvars.bat` | Puts the 64-bit MSVC tools on PATH for every build and test script. | Visual Studio 2022 or newer, or its Build Tools |
 | `package_build.py` | Zips the logging build and its INI for a tester. | Python 3, a built `build\TFPhysics.dll` |
 | `re\` | Reads `Starfield.exe` from disk: Address Library IDs, disassembly, vtables, callers. See `re\README.md`. | Python 3.10+, capstone, numpy, the game |
-| The measuring scripts | Measure A-Body, and write the two data headers and the test poses. See "Where the numbers come from" below. | A-Body's build tools |
+| The measuring scripts | Measure A-Body, and write the three data headers and the test poses. See "Where the numbers come from" below. | A-Body's build tools |
 
 ## vcvars.bat
 
@@ -60,7 +60,7 @@ who calls a function, and which code uses a string. Each one is described in `re
 
 ## Where the numbers come from
 
-These scripts measured the numbers in `src\collision_data.h` and `src\body_shape_data.h`, and wrote the test poses in
+These scripts measured the numbers in `src\collision_data.h`, `src\body_shape_data.h` and `src\preset_data.h`, and wrote the test poses in
 `tests\cases\`. They show how each number was made, and they rebuild the files when A-Body's mesh, skeleton or physics
 presets change. On A-Body's data they write the shipped files again, line for line.
 
@@ -69,8 +69,8 @@ of this package:
 
 | Variable | The folder | Used by |
 |---|---|---|
-| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` |
-| `ABODY_AUDIT` | A-Body's build tree, with the physics preset and jiggle tables | `gen_body_shape_data.py` |
+| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` and `gen_preset_data.py` |
+| `ABODY_AUDIT` | A-Body's build tree, with the physics preset and jiggle tables | `gen_body_shape_data.py`, `gen_preset_data.py` |
 
 `natural_rest.py` also reads `reports\phase3\physics\collision\sizes.json` from the build tree that A-Body's `v06.py`
 points at. They need Python 3 with numpy (A-Body's tools also need scipy), and each one takes a second or two.
@@ -84,6 +84,7 @@ python tools\glute_sizes.py
 python tools\gen_collision_data.py
 python tests\export_collision_cases.py
 python tools\gen_body_shape_data.py
+python tools\gen_preset_data.py
 ```
 
 Then build, and run `tests\run_tests.bat`: `collide_test` checks the plugin, with the new header, against the new
@@ -190,6 +191,16 @@ is):
 ```
 wrote ...\src\body_shape_data.h: 50 bones {'breast': 8, 'butt': 8, 'belly': 4, 'thigh': 10, 'hip': 2, 'calf': 4, 'arm': 4, 'torso': 10}; Max + Max is the largest on every bone: True
 ```
+
+### gen_preset_data.py: src\preset_data.h
+
+For each of A-Body's 50 spring bones, the springs of every installer setting (5 physics presets × 3 extra-jiggle
+levels), per COM axis as the record stores them: strength, damping ratio and MaxDist. It also lists the levels a part
+can be given: Minimal and Lower (Realistic's springs with a quarter and half its swing), then the five presets. It
+reads the same tables as `gen_body_shape_data.py` and stops if their bone lists differ.
+
+The plugin matches each spring record against these values to find the installed setting, and writes a level's
+springs into the record when a tuning file gives a part that level.
 
 ## Another body
 

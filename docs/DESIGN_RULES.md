@@ -140,3 +140,17 @@ the code does instead.
   falls metres behind.
 - Fix: read both limits. When the speed a step needs is over `[World] fProxyMaxSpeed` or the body's own limit, warp it:
   the keyframe call with a 1 ns step, which takes the game's warp path (placed, velocity 0).
+
+## Tuning
+
+**23. A shared spring record holds only what every body gives it.**
+- Breaks: every body on an armour addon shares its spring records, so a per-body value written there (a character's
+  or an outfit's factor) would give each body the springs of whichever body wrote last.
+- Fix: a record only gets a part's level and bounce speed, the same for every body. The per-body factors (body shape,
+  character, outfit, planet) change only the swing and the damping, which are per instance.
+
+**24. A tuned record stays on the tuned path.**
+- Breaks: with a tuning taken out, a record keeps the last springs written into it, and its instances keep their
+  damping and sub-step rate.
+- Fix: a record once tuned is written on every update from its springs as tuned. Untuned, those are the installed
+  values, bit for bit.

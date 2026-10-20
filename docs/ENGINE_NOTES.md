@@ -65,6 +65,9 @@ constructor is `0x877650`.
 - **No write when settled.** Nothing is written while |offset| and |velocity| are both ≤ 0.5 mm.
 - **Missing bones.** A spring whose target or driver bone is missing is never created.
 - **Defaults** (in the data's constructor): max animation distance 20, Strength 500, Damp 1, Scale 0.25, MaxDist 1000.
+- **What is read when.** The update reads Strength, Scale and MaxDist from the shared record on every update. The
+  constructor caches the damping per instance (`+0xC0` = 2 · √S · ratio) and the sub-step rate (`+0xD0` = 0.63662 ·
+  √(largest S)), so a record's new Strength needs both worked out again for every instance on it.
 
 **Layouts.** `SpringBoneData` holds 3 floats each at:
 
@@ -195,6 +198,13 @@ through vtable[-1] → the CompleteObjectLocator → the type name.
   - (0,0,0) is the base body. Vanilla NPCs use (0,0,0) or (⅓,⅓,⅓). The three are independent (they sum to 0..2).
 - **Life state** = (`dword actor+0xF8` >> 17) & 0xF, as `Actor::IsDead` reads it: vtable slot 269 of `Actor` and
   `PlayerCharacter`, `0x18e4540`. Dead = 1 (dying), 2 (dead), 5 (recycled), 7 (an essential character down).
+- **Form ID:** `form+0x28` (the Papyrus GetFormID native, ID 117985: `mov eax, [r8+0x28]`).
+- **The player's gravity scale,** with its modifiers: `player+0x1138` (GetPlayerGravityScale, ID 65694).
+- **What a character wears** (WornCoversBipedSlot, ID 65296): the inventory at `actor+0xA0`, its lock at `+0xA8`, its
+  count at `+0x28` and its entries at `+0x30`, 0x28 bytes each: the item at `+0x00`, worn when the byte at `+0x20` has
+  any of bits 0-2. An armour (form type 0x22 at `+0x2E`) keeps its biped slots in the 64 bits at `+0x208`.
+  HumanRace's slot names: 3 BODY, 5 Backpack, 35 SS BODY, 36 SS Helmet, 37 SS Backpack. Vanilla clothes are one
+  piece on 3 (often with 5); a spacesuit's body is on 35.
 - **Cell:** `actor+0xB0`. Interior = cell +0x48 bit 0. The exterior world's bhkWorld: ID 938080 is a pointer to a
   pointer.
 

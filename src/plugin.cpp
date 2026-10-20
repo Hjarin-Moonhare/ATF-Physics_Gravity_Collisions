@@ -24,6 +24,9 @@
 // The installed gravity level (x1, x2, x3) is read from the corrective records themselves; breast gravity also follows
 // the breast size sliders (sfee's morph-target weights on the character's record).
 // Every other actor lends its limb and torso shapes to the A-Body bodies near it (a shared table of copied numbers).
+// Tuning files (Data\SFSE\Plugins\TFPhysics\*.ini, read again on a change) give each of the 8 parts its own preset
+// level and its swing, per direction and per bone, settle, bounce speed and sag; and factors per character, per outfit
+// and for the planet's gravity.
 // Logging builds also keep a 5 s log and run the world-collision proxies: two keyframed Havok bodies per A-Body body
 // (ABody_Proxy_Breast_L/R in the test skeletons), set to layer 62 + "collide with nothing" through the collision
 // object's own filter setter, and moved to the breasts each frame with the game's keyframe-with-warp function.
@@ -40,6 +43,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <share.h>
@@ -67,6 +71,7 @@ constexpr bool kCollisions = kDiag;
 
 #include "collision_data.h"
 #include "body_shape_data.h"
+#include "preset_data.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -104,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 18, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 19, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -354,6 +359,7 @@ struct Settings {
     // game's own keyframe time), 1 = the substeps the physics simulates, this update's or the next one's as measured,
     // 2 = this update's, 3 = the next update's (predicted)
     int steerTime = 1;
+    bool tuneReload = true;       // [Tuning] bReload: the tuning files read again when they change
     bool collision = true;        // hands, arms, thighs and the other breast push the soft bones
     bool measureOnly = false;     // find and log contacts (and position snapshots) but push nothing
     bool innerThighs = false;     // the inner-thigh group (in game it only met legs standing close together)
@@ -437,6 +443,7 @@ static void LoadSettings() {
     g_cfg.steerOnce = GetPrivateProfileIntA("World", "bSteerOnce", 1, g_iniPath) != 0;
     const UINT steerTime = GetPrivateProfileIntA("World", "iSteerTime", 1, g_iniPath);
     g_cfg.steerTime = steerTime <= 3 ? static_cast<int>(steerTime) : 1;
+    g_cfg.tuneReload = GetPrivateProfileIntA("Tuning", "bReload", 1, g_iniPath) != 0;
     g_cfg.collision = GetPrivateProfileIntA("Collision", "bEnabled", 1, g_iniPath) != 0;
     auto readC = [](const char* key, float def) {
         char b[64];
@@ -487,6 +494,269 @@ static void LoadSettings() {
         g_cfg.steer = false;
     }
 }
+
+// ------------------------------------------------------------------ tuning each part
+// On top of the installed physics: TFPhysics.ini [Tuning] and every .ini file in the TFPhysics folder next to it
+// (Data\SFSE\Plugins\TFPhysics\, in name order; the installer puts its choices there, a file per part).  Sections:
+//   [All]       sLevel: every part's level where the part's own section names none (the installer's Lower and
+//               Minimal presets)
+//   [Breasts] [Butt] [Belly] [Thighs] [Hips] [Calves] [Arms] [Torso]
+//               sLevel: whose springs the part uses: Preset (as installed), Off, or Minimal, Lower, Realistic, Low,
+//               Medium, High, Max (that preset's springs at the installed extra-jiggle level; Minimal and Lower are
+//               Realistic's with a quarter and half its swing); fSwing; fSideToSide, fFrontBack, fUpDown (per COM axis);
+//               fSettle (x its damping, never looser than the Max preset); fBounceSpeed (x its springs' frequency);
+//               fSag (g, the gravity inside its springs); and a key per bone of the part (x that bone's swing)
+//   [Player], [NPC <hex form ID>]   fAll, fBreasts .. fTorso: x the swing of that character's parts (an NPC by its
+//               reference's form ID, as the console shows it, or its base record's)
+//   [Outfit <name>]   sSlots (biped slots, comma separated) or sForm (an armour's form ID, hex), and fAll, fBreasts ..
+//               fTorso: x the swing of a body wearing such a piece (per part the lowest of everything it wears)
+// Every value is held to its range; a key left out keeps what an earlier file said.
+enum { kLevelPreset = -1, kLevelOff = kNumLevels };
+static const char* const kPartSection[kNumParts] = {"Breasts", "Butt", "Belly", "Thighs", "Hips", "Calves", "Arms", "Torso"};
+struct PartTune {
+    int level = kLevelPreset;
+    float swing = 1.0f, dir[3] = {1.0f, 1.0f, 1.0f}, settle = 1.0f, bounce = 1.0f;   // dir: side, fore/aft, up
+    float sag = -1.0f;   // the springs' gravity, g; -1: TFPhysics.ini [Springs]
+};
+struct CharTune { std::uint32_t id = 0; bool player = false; float part[kNumParts] = {}; };
+struct OutfitTune { std::uint64_t slots = 0; std::uint32_t form = 0; float part[kNumParts] = {}; char name[40] = {}; };
+struct TuneSettings {
+    PartTune part[kNumParts];
+    int allLevel = kLevelPreset;
+    float bone[kNumPresetBones];
+    CharTune chars[64];
+    int nChars = 0;
+    OutfitTune outfits[24];
+    int nOutfits = 0;
+    bool planet = true;          // [Tuning] bPlanetGravity
+    float planetAmount = 1.0f;   // [Tuning] fPlanetGravity: 1 = the planet's gravity as it is, 0 = Earth's always
+    bool outfitsOn = true;       // [Tuning] bOutfits
+    bool springs = false;        // some part's springs may differ from the installed ones (a level, a bounce speed)
+    bool scaled = false;         // some swing factor is not 1 (a level's, Off, the multipliers, a bone)
+    bool damping = false;        // some part's damping may differ (a level, fSettle)
+    int files = 0;
+    char fileNames[240] = {};
+    TuneSettings() {
+        for (float& b : bone) b = 1.0f;
+    }
+};
+static TuneSettings g_tunes[2];
+static std::atomic<int> g_tuneNow{0};
+static const TuneSettings& Tune() { return g_tunes[g_tuneNow.load(std::memory_order_acquire)]; }
+static int LevelOf(const TuneSettings& t, int part) {   // a part's level: its own, else [All]'s
+    const int l = t.part[part].level;
+    return l == kLevelPreset ? t.allLevel : l;
+}
+
+// the part of each bone in preset_data.h (by its name in body_shape_data.h), worked out once
+static int PresetBonePart(int b) {
+    static int part[kNumPresetBones];
+    static std::once_flag once;
+    std::call_once(once, [] {
+        for (int i = 0; i < kNumPresetBones; ++i) {
+            part[i] = -1;
+            for (const ShapeBoneDef& d : kShapeBones)
+                if (!strcmp(d.name, kPresetBones[i].name)) part[i] = d.part;
+        }
+    });
+    return b >= 0 && b < kNumPresetBones ? part[b] : -1;
+}
+
+static bool IniHas(const char* file, const char* sec, const char* key, char* buf, DWORD n) {
+    GetPrivateProfileStringA(sec, key, "\x01", buf, n, file);
+    return buf[0] != '\x01';
+}
+static void IniF(const char* file, const char* sec, const char* key, float& v, float lo, float hi) {
+    char b[64];
+    if (!IniHas(file, sec, key, b, sizeof(b))) return;
+    const float x = static_cast<float>(atof(b));
+    v = !(x >= lo) ? lo : (x > hi ? hi : x);   // "nan" reads as NaN: the low end
+}
+static int LevelNamed(const char* s) {   // -2: not a level's name
+    if (!_stricmp(s, "Preset") || !_stricmp(s, "Installed") || !_stricmp(s, "Default")) return kLevelPreset;
+    if (!_stricmp(s, "Off") || !_stricmp(s, "None")) return kLevelOff;
+    for (int l = 0; l < kNumLevels; ++l)
+        if (!_stricmp(s, kLevelName[l])) return l;
+    return -2;
+}
+static void PartKeys(const char* file, const char* sec, float out[kNumParts]) {   // fAll, then fBreasts .. fTorso
+    float all = 1.0f;
+    IniF(file, sec, "fAll", all, 0.0f, 3.0f);
+    for (int p = 0; p < kNumParts; ++p) {
+        out[p] = all;
+        char k[24];
+        snprintf(k, sizeof(k), "f%s", kPartSection[p]);
+        IniF(file, sec, k, out[p], 0.0f, 3.0f);
+    }
+}
+static void ReadTuneFile(const char* file, TuneSettings& t) {
+    char names[8192];
+    const DWORD n = GetPrivateProfileSectionNamesA(names, sizeof(names), file);
+    for (const char* sec = names; sec < names + n && *sec; sec += strlen(sec) + 1) {
+        char b[160];
+        if (!_stricmp(sec, "All")) {
+            if (IniHas(file, sec, "sLevel", b, sizeof(b)) && LevelNamed(b) != -2) t.allLevel = LevelNamed(b);
+            continue;
+        }
+        int part = -1;
+        for (int p = 0; p < kNumParts; ++p)
+            if (!_stricmp(sec, kPartSection[p])) part = p;
+        if (part >= 0) {
+            PartTune& pt = t.part[part];
+            if (IniHas(file, sec, "sLevel", b, sizeof(b)) && LevelNamed(b) != -2) pt.level = LevelNamed(b);
+            IniF(file, sec, "fSwing", pt.swing, 0.0f, 3.0f);
+            IniF(file, sec, "fSideToSide", pt.dir[0], 0.0f, 3.0f);
+            IniF(file, sec, "fFrontBack", pt.dir[1], 0.0f, 3.0f);
+            IniF(file, sec, "fUpDown", pt.dir[2], 0.0f, 3.0f);
+            IniF(file, sec, "fSettle", pt.settle, 0.25f, 4.0f);
+            IniF(file, sec, "fBounceSpeed", pt.bounce, 0.5f, 2.0f);
+            if (IniHas(file, sec, "fSag", b, sizeof(b))) {
+                float g = 0.0f;
+                IniF(file, sec, "fSag", g, 0.0f, 0.3f);
+                pt.sag = g;
+            }
+            for (int i = 0; i < kNumPresetBones; ++i)
+                if (PresetBonePart(i) == part) IniF(file, sec, kPresetBones[i].name, t.bone[i], 0.0f, 3.0f);
+            continue;
+        }
+        const bool player = !_stricmp(sec, "Player");
+        if (player || !_strnicmp(sec, "NPC ", 4)) {
+            CharTune c;
+            c.player = player;
+            c.id = player ? 0 : static_cast<std::uint32_t>(strtoul(sec + 4, nullptr, 16));
+            if ((!player && !c.id) || t.nChars >= 64) continue;
+            PartKeys(file, sec, c.part);
+            t.chars[t.nChars++] = c;
+            continue;
+        }
+        if (!_strnicmp(sec, "Outfit ", 7)) {
+            OutfitTune o;
+            strncpy_s(o.name, sec + 7, _TRUNCATE);
+            if (IniHas(file, sec, "sForm", b, sizeof(b))) o.form = static_cast<std::uint32_t>(strtoul(b, nullptr, 16));
+            if (IniHas(file, sec, "sSlots", b, sizeof(b)))
+                for (char* s = b; *s;) {
+                    if (*s < '0' || *s > '9') {
+                        ++s;
+                        continue;
+                    }
+                    char* end = nullptr;
+                    const long v = strtol(s, &end, 10);
+                    s = end;
+                    if (v >= 0 && v < 64) o.slots |= 1ull << v;
+                }
+            if ((!o.form && !o.slots) || t.nOutfits >= 24) continue;
+            PartKeys(file, sec, o.part);
+            t.outfits[t.nOutfits++] = o;
+        }
+    }
+}
+static void TuneFlags(TuneSettings& t);   // below
+static void TuneDir(char* out, size_t n) {   // the TFPhysics folder next to TFPhysics.ini
+    snprintf(out, n, "%s", g_iniPath);
+    if (char* slash = strrchr(out, '\\')) snprintf(slash + 1, n - static_cast<size_t>(slash + 1 - out), "TFPhysics");
+}
+static void LoadTuning(TuneSettings& t) {
+    t = TuneSettings{};
+    t.planet = GetPrivateProfileIntA("Tuning", "bPlanetGravity", 1, g_iniPath) != 0;
+    IniF(g_iniPath, "Tuning", "fPlanetGravity", t.planetAmount, 0.0f, 1.0f);
+    t.outfitsOn = GetPrivateProfileIntA("Tuning", "bOutfits", 1, g_iniPath) != 0;
+    char dir[MAX_PATH], pat[MAX_PATH];
+    TuneDir(dir, sizeof(dir));
+    snprintf(pat, sizeof(pat), "%s\\*.ini", dir);
+    static char names[64][MAX_PATH];
+    int n = 0;
+    WIN32_FIND_DATAA f;
+    const HANDLE h = FindFirstFileA(pat, &f);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(f.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && n < 64) strncpy_s(names[n++], f.cFileName, _TRUNCATE);
+        } while (FindNextFileA(h, &f));
+        FindClose(h);
+    }
+    std::qsort(names, static_cast<size_t>(n), sizeof(names[0]),
+               [](const void* a, const void* b) { return _stricmp(static_cast<const char*>(a), static_cast<const char*>(b)); });
+    for (int i = 0; i < n; ++i) {
+        char file[MAX_PATH];
+        snprintf(file, sizeof(file), "%s\\%s", dir, names[i]);
+        ReadTuneFile(file, t);
+        const size_t len = strlen(t.fileNames);
+        if (len + strlen(names[i]) + 3 < sizeof(t.fileNames)) snprintf(t.fileNames + len, sizeof(t.fileNames) - len, "%s%s", len ? ", " : "", names[i]);
+    }
+    t.files = n;
+    TuneFlags(t);
+}
+// what a tuning changes at all (so a body with nothing tuned takes the installed path)
+static void TuneFlags(TuneSettings& t) {
+    t.springs = t.scaled = t.damping = false;
+    for (int p = 0; p < kNumParts; ++p) {
+        const PartTune& pt = t.part[p];
+        const int l = LevelOf(t, p);
+        if (l >= 0 && l < kNumLevels) t.springs = t.damping = true;
+        if (l == kLevelOff || (l >= 0 && l < kNumLevels && kLevelSwing[l] != 1.0f)) t.scaled = true;
+        if (pt.swing != 1.0f || pt.dir[0] != 1.0f || pt.dir[1] != 1.0f || pt.dir[2] != 1.0f) t.scaled = true;
+        if (pt.bounce != 1.0f) t.springs = t.damping = true;
+        if (pt.settle != 1.0f) t.damping = true;
+    }
+    for (float b : t.bone)
+        if (b != 1.0f) t.scaled = true;
+}
+// the files' names, sizes and times, hashed: a change means a reload
+static std::uint64_t TuneStamp() {
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, size_t n) {
+        const auto* c = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; ++i) h = (h ^ c[i]) * 1099511628211ull;
+    };
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &a)) {
+        mix(&a.ftLastWriteTime, sizeof(a.ftLastWriteTime));
+        mix(&a.nFileSizeLow, 4);
+    }
+    char dir[MAX_PATH], pat[MAX_PATH];
+    TuneDir(dir, sizeof(dir));
+    snprintf(pat, sizeof(pat), "%s\\*.ini", dir);
+    WIN32_FIND_DATAA f;
+    const HANDLE fh = FindFirstFileA(pat, &f);
+    if (fh != INVALID_HANDLE_VALUE) {
+        do {
+            mix(f.cFileName, strlen(f.cFileName));
+            mix(&f.ftLastWriteTime, sizeof(f.ftLastWriteTime));
+            mix(&f.nFileSizeLow, 4);
+        } while (FindNextFileA(fh, &f));
+        FindClose(fh);
+    }
+    return h;
+}
+static void LogTuning(const char* what, const TuneSettings& t);   // below, with the log
+static std::atomic<std::uint64_t> g_tuneCheckMs{0};
+static std::atomic<bool> g_tuneBusy{false};
+static std::uint64_t g_tuneStamp = 0;
+// Every 2 s, on whichever game thread gets here first: when a file changed, the other copy is read and then made the
+// one in use (a reader holds a copy for one update, so the copy written is two seconds out of use)
+static void MaybeReloadTuning() {
+    if (!g_cfg.tuneReload) return;
+    const std::uint64_t now = GetTickCount64();
+    if (now < g_tuneCheckMs.load(std::memory_order_relaxed) || g_tuneBusy.exchange(true)) return;
+    g_tuneCheckMs.store(now + 2000, std::memory_order_relaxed);
+    const std::uint64_t stamp = TuneStamp();
+    if (stamp != g_tuneStamp) {
+        g_tuneStamp = stamp;
+        const int next = 1 - g_tuneNow.load(std::memory_order_relaxed);
+        LoadTuning(g_tunes[next]);
+        g_tuneNow.store(next, std::memory_order_release);
+        LogTuning("tuning: read again (a file changed)", g_tunes[next]);
+    }
+    g_tuneBusy.store(false);
+}
+
+// three game functions, checked at load, that show where the tuning reads three things: the player's gravity
+// scale with its modifiers (GetPlayerGravityScale, ID 65694: mov ecx, [player+0x1138]), a form's ID (Papyrus
+// GetFormID, ID 117985: mov eax, [form+0x28]) and what a character wears (WornCoversBipedSlot, ID 65296; ReadWorn)
+enum TuneAddr { kGravityScaleFn, kGetFormIdFn, kWornSlotFn, kNumTuneAddrs };
+constexpr AddrRef kTuneAddrRef[kNumTuneAddrs] = {
+    {65694, 0, "GetPlayerGravityScale"}, {117985, 0, "Papyrus GetFormID"}, {65296, 0, "WornCoversBipedSlot"}};
+static bool g_gravityScaleOk = false, g_formIdOk = false, g_wornOk = false;
+constexpr std::ptrdiff_t kPlayerGravityScale = 0x1138, kFormId = 0x28;
 
 // ------------------------------------------------------------------ log and statistics
 static std::mutex g_sampleMutex;   // the gravity sample below
@@ -1080,6 +1350,9 @@ void WriteRigCopy(void* node, const float t[3]) {
     g_rigRelease(rig);
 }
 
+// a spring's record as tuned (strength, damping ratio, MaxDist per COM axis) and the swing on top of it
+struct SpringEff { float strength[3], ratio[3], travel[3], swing; };
+
 // One actor's view of its modifier list: A-Body's gravity anchors and its springs (driver COM).
 static_assert(kNumParts == 8, "ActorView's per-part defaults below list 8 parts");
 struct ActorView {
@@ -1107,6 +1380,9 @@ struct ActorView {
     bool ceilReady = false;
     float strain = 1.0f;            // the stretch guard (StrainOf)
     float ceilScale = 1.0f;         // ... the gravity shapes' ceilings x this
+    bool tuned = false;             // a character, outfit or planet factor in use for this body
+    SpringEff eff[128];             // ... each spring as tuned, worked out once per update (EffOf)
+    bool effDone[128] = {};
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -1148,11 +1424,18 @@ enum SpringGroup { kGroupOther, kGroupBreast, kGroupBelly, kGroupButt, kGroupThi
 // ceil: its own jiggle ceiling per COM axis (the release's largest travel / the installed one, at least 1; a part
 // takes the smallest of its bones', PartCeilings);
 // dampFloor: the lowest damping ratio a body may give it (the release's lowest, or the record's own if lower)
+// presetBone: its entry in preset_data.h (-1: not one of the 50); instPreset / instExtra: the installer
+// setting its record was built with (the physics preset and extra-jiggle level whose springs match it exactly; -1:
+// none, e.g. another mod's springs); origStrength / origRatio: the record's strength and damping ratio as installed;
+// maxTravel: the release's largest MaxDist for the bone (Max physics + Max jiggle)
 struct SpringInfo {
     std::atomic<void*> data;
     float orig[3];
     int group, side, bone, part;
     float ceil[3], dampFloor[3];
+    int presetBone, instPreset, instExtra;
+    float origStrength[3], origRatio[3], maxTravel[3];
+    mutable std::atomic<bool> touched;   // the plugin has given the record other springs (put back when untuned)
 };
 static std::mutex g_springMutex;   // only for adding; lookups take no lock (entries are only ever added, published whole)
 constexpr int kSpringSlots = 2048;
@@ -1187,7 +1470,7 @@ static void Classify(void* target, SpringInfo& e) {
 // installed (orig = its MaxDist before the plugin changed anything; +0x30 its damping ratio, never changed)
 static void ShapeLimits(void* data, void* target, SpringInfo& e) {
     e.part = -1;
-    for (int k = 0; k < 3; ++k) e.ceil[k] = 1.0f, e.dampFloor[k] = 0.0f;
+    for (int k = 0; k < 3; ++k) e.ceil[k] = 1.0f, e.dampFloor[k] = 0.0f, e.maxTravel[k] = e.orig[k];
     char name[64];
     if (!NodeName(target, name, sizeof(name))) return;
     const float* ratio = &At<float>(data, 0x30);
@@ -1197,7 +1480,36 @@ static void ShapeLimits(void* data, void* target, SpringInfo& e) {
         for (int k = 0; k < 3; ++k) {
             e.ceil[k] = e.orig[k] > 1e-6f && d.maxDist[k] > e.orig[k] ? d.maxDist[k] / e.orig[k] : 1.0f;
             e.dampFloor[k] = ratio[k] < d.damp[k] ? ratio[k] : d.damp[k];
+            e.maxTravel[k] = d.maxDist[k] > e.orig[k] ? d.maxDist[k] : e.orig[k];
         }
+        return;
+    }
+}
+
+// which installer setting a record was built with: the physics preset and extra-jiggle level whose springs
+// for its bone (preset_data.h) match its strength, damping ratio and MaxDist as installed, to 1 part in 10,000.  Every
+// setting differs from every other preset's on every bone; the extra-jiggle levels only differ on the parts they move
+static void MatchPreset(void* target, SpringInfo& e) {
+    e.presetBone = e.instPreset = e.instExtra = -1;
+    char name[64];
+    if (!NodeName(target, name, sizeof(name))) return;
+    auto same3 = [](const float* x, const float* y) {
+        for (int k = 0; k < 3; ++k)
+            if (!(std::fabs(x[k] - y[k]) <= 1e-4f * (std::fabs(y[k]) > 1.0f ? std::fabs(y[k]) : 1.0f))) return false;
+        return true;
+    };
+    for (int b = 0; b < kNumPresetBones; ++b) {
+        if (strcmp(name, kPresetBones[b].name)) continue;
+        e.presetBone = b;
+        for (int p = 0; p < kNumSpringPresets && e.instPreset < 0; ++p)
+            for (int j = 0; j < kNumExtraJiggle; ++j) {
+                const PresetSpring& s = kPresetBones[b].s[p][j];
+                if (same3(e.origStrength, s.strength) && same3(e.origRatio, s.damping) && same3(e.orig, s.maxDist)) {
+                    e.instPreset = p;
+                    e.instExtra = j;
+                    break;
+                }
+            }
         return;
     }
 }
@@ -1219,8 +1531,11 @@ static const SpringInfo* SpringInfoFor(void* data, void* target) {
         if (g_springCount >= kSpringSlots * 3 / 4) return nullptr;   // never forget an original: stop adding instead
         ++g_springCount;
         std::memcpy(e.orig, &At<float>(data, 0x50), 12);   // copied before the plugin ever changes it
+        std::memcpy(e.origStrength, &At<float>(data, 0x20), 12);   // and these two
+        std::memcpy(e.origRatio, &At<float>(data, 0x30), 12);
         Classify(target, e);
         ShapeLimits(data, target, e);
+        MatchPreset(target, e);
         e.data.store(data, std::memory_order_release);   // published whole: readers see orig and group with it
         return &e;
     }
@@ -1339,7 +1654,43 @@ struct SizeRead {
     float slider[kNumSliders] = {};
     float tri[3] = {};      // Thin, Strong, Overweight as stored
     char names[320] = {};   // the weights found, for the log
+    // the player's body; the reference's and the record's form IDs (0: not read); what it wears (each worn
+    // armour's form ID and biped slots); the player's gravity scale (-1: not read)
+    bool player = false;
+    std::uint32_t refId = 0, baseId = 0;
+    int nWorn = 0;
+    std::uint32_t wornForm[24] = {};
+    std::uint64_t wornSlots[24] = {};
+    float gravityScale = -1.0f;
 };
+
+// what a character wears, the way WornCoversBipedSlot (ID 65296) reads it: the inventory at +0xA0 (the game
+// holds the lock at +0xA8 for it; this guarded read goes without, so a list changing under it gives one wrong answer,
+// for 2 s at most), its count at +0x28 and its entries (0x28 bytes) at +0x30: the item at +0x00, worn when the byte at
+// +0x20 has any of bits 0-2; an armour (form type 0x22 at +0x2E) covers the biped slots set in the 64 bits at +0x208
+static void ReadWorn(void* actor, SizeRead& r) {
+    char* inv = nullptr;
+    char* items = nullptr;
+    std::uint32_t count = 0;
+    if (!SafeCopy(&inv, static_cast<char*>(actor) + 0xA0, 8) || !inv || !SafeCopy(&count, inv + 0x28, 4) ||
+        !SafeCopy(&items, inv + 0x30, 8) || !items || count > 4096)
+        return;
+    for (std::uint32_t i = 0; i < count && r.nWorn < 24; ++i) {
+        unsigned char e[0x28];
+        if (!SafeCopy(e, items + static_cast<size_t>(i) * 0x28, sizeof(e))) return;
+        if (!(e[0x20] & 7)) continue;
+        void* form = nullptr;
+        std::memcpy(&form, e, 8);
+        std::uint8_t type = 0;
+        std::uint64_t mask = 0;
+        std::uint32_t id = 0;
+        if (!form || !SafeCopy(&type, static_cast<char*>(form) + 0x2E, 1) || type != 0x22 ||
+            !SafeCopy(&mask, static_cast<char*>(form) + 0x208, 8) || !SafeCopy(&id, static_cast<char*>(form) + kFormId, 4))
+            continue;
+        r.wornForm[r.nWorn] = id;
+        r.wornSlots[r.nWorn++] = mask;
+    }
+}
 
 static std::atomic<bool> g_hintLogged{false};
 static float Unit(float v) { return !(v > 0) ? 0.0f : (v > 1 ? 1.0f : v); }   // 0..1, and NaN -> 0
@@ -1354,9 +1705,17 @@ static SizeRead ReadSize(void* owner, void* actorHint) {
     if (kDiag && actor && !g_hintLogged.exchange(true)) Log("size: character taken from the game's call (its register)");
     if (!actor) return r;
     r.character = true;
+    // who it is, what it wears, and for the player the gravity it feels
+    r.player = ClassAt(actor, &g_playerVt, 1);
+    if (g_formIdOk) SafeCopy(&r.refId, static_cast<char*>(actor) + kFormId, 4);
+    if (g_wornOk) ReadWorn(actor, r);
+    float gs = -1.0f;
+    if (r.player && g_gravityScaleOk && SafeCopy(&gs, static_cast<char*>(actor) + kPlayerGravityScale, 4) && gs >= 0.0f && gs < 10.0f)
+        r.gravityScale = gs;
     void* npc = FindByClass(actor, 0x300, &g_npcVt, 1, g_npcOff);
     if (!npc) return r;
     r.record = true;
+    if (g_formIdOk) SafeCopy(&r.baseId, static_cast<char*>(npc) + kFormId, 4);
     if (g_triangleOk && SafeCopy(r.tri, static_cast<char*>(npc) + kNpcTriangle, 12)) r.triangle = true;
     void* table = nullptr;
     if (!SafeCopy(&table, static_cast<char*>(npc) + kNpcMorphWeights, 8) || !table) return r;   // no weights at all
@@ -1392,6 +1751,7 @@ struct BodyFactors {
     float strain = 1.0f;       // how much more its breast skin stretches than the base body's (StrainOf)
     float ceilScale = 1.0f;    // ... so its gravity shapes' ceilings x this (1 / strain, 0.15 to 1)
     bool shape = false;        // [BodyShape] in use for this body
+    bool tuned = false;        // a character, outfit or planet factor in use for this body
     BodyFactors() {
         for (int p = 0; p < kNumParts; ++p) jiggle[p] = gravity[p] = 1.0f;
     }
@@ -1418,6 +1778,61 @@ static float StrainOf(const SizeRead& r) {
     return s > 1.0f ? std::pow(s, 1.15f) : s;
 }
 
+// on top of the body's shape: the character's own section, what it wears (per part the lowest factor of all
+// its pieces; a section naming an armour's form ID decides for that piece instead of the slots), and the planet's
+// gravity (the player's gravity scale, kept for every body: the bodies loaded are near the player)
+static std::atomic<std::uint32_t> g_gravityScaleBits{0};
+static std::atomic<bool> g_gravityKnown{false};
+static float PlanetFactor(const TuneSettings& T) {
+    if (!T.planet || !g_gravityKnown.load(std::memory_order_relaxed)) return 1.0f;
+    const std::uint32_t bits = g_gravityScaleBits.load(std::memory_order_relaxed);
+    float s;
+    std::memcpy(&s, &bits, 4);
+    const float k = 1.0f + T.planetAmount * (s - 1.0f);
+    return !(k >= 0.0f) ? 0.0f : (k > 3.0f ? 3.0f : k);
+}
+static void TuneBody(const SizeRead& r, BodyFactors& f) {
+    const TuneSettings& T = Tune();
+    for (int i = T.nChars - 1; i >= 0; --i) {   // the last section naming it
+        const CharTune& c = T.chars[i];
+        if (!(c.player ? r.player : (c.id && (c.id == r.refId || c.id == r.baseId)))) continue;
+        for (int p = 0; p < kNumParts; ++p) f.jiggle[p] *= c.part[p];
+        f.tuned = true;
+        break;
+    }
+    if (T.outfitsOn && T.nOutfits) {
+        float most[kNumParts];
+        for (float& m : most) m = 1.0f;
+        bool any = false;
+        for (int w = 0; w < r.nWorn; ++w) {
+            const OutfitTune* own = nullptr;
+            for (int o = 0; o < T.nOutfits && !own; ++o)
+                if (T.outfits[o].form && T.outfits[o].form == r.wornForm[w]) own = &T.outfits[o];
+            for (int o = 0; o < T.nOutfits; ++o) {
+                const OutfitTune& ot = T.outfits[o];
+                if (own ? &ot != own : (ot.form || !(ot.slots & r.wornSlots[w]))) continue;
+                for (int p = 0; p < kNumParts; ++p) most[p] = ot.part[p] < most[p] ? ot.part[p] : most[p];
+                any = true;
+            }
+        }
+        if (any) {
+            for (int p = 0; p < kNumParts; ++p) f.jiggle[p] *= most[p];
+            f.tuned = true;
+        }
+    }
+    if (r.gravityScale >= 0.0f) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &r.gravityScale, 4);
+        g_gravityScaleBits.store(bits, std::memory_order_relaxed);
+        g_gravityKnown.store(true, std::memory_order_relaxed);
+    }
+    const float k = PlanetFactor(T);
+    if (k != 1.0f) {
+        for (float& g : f.gravity) g *= k;
+        f.tuned = true;
+    }
+}
+
 static BodyFactors FactorsFrom(const SizeRead& r) {
     BodyFactors f;
     const float size = 1.0f + g_cfg.sizeLarge * r.slider[kBreastsLarge] - g_cfg.sizeSmall * r.slider[kBreastsSmall];
@@ -1428,7 +1843,10 @@ static BodyFactors FactorsFrom(const SizeRead& r) {
         const float c = 1.0f / f.strain;
         f.ceilScale = c > 1.0f ? 1.0f : (c < 0.15f ? 0.15f : c);
     }
-    if (!g_cfg.shape) return f;
+    if (!g_cfg.shape) {
+        TuneBody(r, f);
+        return f;
+    }
     f.shape = true;
     const float t[3] = {Unit(r.tri[0]), Unit(r.tri[1]), Unit(r.tri[2])};
     const float common = std::fmin(t[0], std::fmin(t[1], t[2]));
@@ -1455,6 +1873,7 @@ static BodyFactors FactorsFrom(const SizeRead& r) {
         f.jiggle[p] = held(jb * part[p]);
         f.gravity[p] = held(gb * part[p]);
     }
+    TuneBody(r, f);
     return f;
 }
 
@@ -1476,17 +1895,62 @@ static void LogFactors(const char* what, const SizeRead& r, const BodyFactors& f
     size_t len = 0;
     for (int p = 0; p < kNumParts; ++p)
         len += snprintf(parts + len, sizeof(parts) - len, " %s %.2f/%.2f;", kPartName[p], f.jiggle[p], f.gravity[p]);
-    Log("%s: character %s, record %s, %d morph weights, triangle %s (stored thin %.2f muscular %.2f heavy %.2f -> %.2f "
+    // who, and what it wears
+    std::uint64_t slots = 0;
+    for (int w = 0; w < r.nWorn; ++w) slots |= r.wornSlots[w];
+    char who[160];
+    snprintf(who, sizeof(who), " (%s, reference %08X, record %08X, wearing %d pieces, biped slots 0x%016llX%s)",
+             r.player ? "you" : "not you", r.refId, r.baseId, r.nWorn, static_cast<unsigned long long>(slots),
+             r.gravityScale >= 0.0f ? ", gravity scale read" : "");
+    Log("%s%s: character %s, record %s, %d morph weights, triangle %s (stored thin %.2f muscular %.2f heavy %.2f -> %.2f "
         "%.2f %.2f), TF_BreastsLarge %.2f, TF_BreastsSmall %.2f -> breast size x%.2f, breast gravity x%.2f; stretch guard: "
-        "breast strain x%.2f, shape ceilings x%.2f; jiggle/gravity per part:%s%s", what, r.character ? "found" : "NOT found",
+        "breast strain x%.2f, shape ceilings x%.2f; jiggle/gravity per part:%s%s", what, who, r.character ? "found" : "NOT found",
         r.record ? "found" : "NOT found", r.weights, r.triangle ? "read" : "not read", r.tri[0], r.tri[1], r.tri[2], f.thin,
         f.muscular, f.heavy, r.slider[kBreastsLarge], r.slider[kBreastsSmall], f.breastSize, f.gravity[kPartBreast],
-        f.strain, f.ceilScale, f.shape ? parts : " (body shape off)", r.names);
+        f.strain, f.ceilScale, f.shape || f.tuned ? parts : " (body shape off)", r.names);
+}
+
+// the tuning in use, at load and whenever it is read again
+static void LogTuning(const char* what, const TuneSettings& t) {
+    if constexpr (!kDiag) {
+        (void)what;
+        (void)t;
+        return;
+    } else {
+        char parts[1400];
+        size_t len = 0;
+        for (int p = 0; p < kNumParts && len + 160 < sizeof(parts); ++p) {
+            const PartTune& pt = t.part[p];
+            const int l = LevelOf(t, p);
+            char sag[32] = "";
+            if (pt.sag >= 0.0f) snprintf(sag, sizeof(sag), ", sag %.3f g", pt.sag);
+            len += snprintf(parts + len, sizeof(parts) - len, " %s %s (swing x%.2f, side x%.2f, fore/aft x%.2f, up x%.2f, settle "
+                            "x%.2f, bounce x%.2f%s);", kPartName[p], l == kLevelPreset ? "as installed" : l == kLevelOff ? "off"
+                            : kLevelName[l], pt.swing, pt.dir[0], pt.dir[1], pt.dir[2], pt.settle, pt.bounce, sag);
+        }
+        int bones = 0;
+        for (float b : t.bone) bones += b != 1.0f;
+        char outfits[400] = "";
+        size_t ol = 0;
+        for (int o = 0; o < t.nOutfits && ol + 60 < sizeof(outfits); ++o)
+            ol += snprintf(outfits + ol, sizeof(outfits) - ol, "%s%s (breasts x%.2f)", ol ? ", " : "", t.outfits[o].name,
+                           t.outfits[o].part[kPartBreast]);
+        Log("%s: %d files in TFPhysics\\ (%s); [All] %s;%s %d bones changed; %d character sections; outfits %s, %d sections "
+            "(%s); planet gravity %s (x%.2f of the difference); the game reads: gravity scale %s, form IDs %s, worn items %s; "
+            "read again on a change %s", what, t.files, t.files ? t.fileNames : "none", t.allLevel == kLevelPreset ? "as installed"
+            : t.allLevel == kLevelOff ? "off" : kLevelName[t.allLevel], parts, bones, t.nChars, t.outfitsOn ? "on" : "off",
+            t.nOutfits, outfits, t.planet ? "on" : "off", t.planetAmount, g_gravityScaleOk ? "checked" : "NOT confirmed",
+            g_formIdOk ? "checked" : "NOT confirmed", g_wornOk ? "checked" : "NOT confirmed", g_cfg.tuneReload ? "on" : "off");
+    }
 }
 
 // The factors of the body whose 3D root this is (read again every 2 s, so slider changes in the looks menu show up)
+static bool TuneReadsBodies() {   // the tuning needs to know who a body is, what it wears, or the gravity
+    const TuneSettings& T = Tune();
+    return T.nChars > 0 || (T.outfitsOn && T.nOutfits > 0) || (T.planet && g_gravityScaleOk);
+}
 static BodyFactors BodyFactorsOf(void* owner, void* actorHint = nullptr) {
-    if ((!g_cfg.sizeScaling && !g_cfg.shape) || !g_actorVt || !owner) return FactorsFrom(SizeRead{});
+    if ((!g_cfg.sizeScaling && !g_cfg.shape && !TuneReadsBodies()) || !g_actorVt || !owner) return FactorsFrom(SizeRead{});
     const std::uint64_t now = GetTickCount64();
     const std::uint64_t h = (reinterpret_cast<std::uintptr_t>(owner) >> 4) * 0x9E3779B97F4A7C15ull >> 55;
     SizeEntry* slot = nullptr;
@@ -1562,23 +2026,68 @@ static void TakeFactors(ActorView& v, const BodyFactors& f) {
         v.gravity[p] = f.gravity[p];
     }
     v.shapeOn = f.shape;
+    v.tuned = f.tuned;
+}
+
+// a spring as tuned.  Its part's level gives it that preset's springs (the bone's in preset_data.h, at the
+// extra-jiggle level its record was built with) and that level's swing; Off keeps the springs and swings nothing;
+// fBounceSpeed multiplies the strength by its square (the frequency goes with sqrt(strength)).  A record no installer
+// setting matches keeps its own springs (a level then changes only the swing)
+static void EffectiveOf(const SpringInfo& info, const TuneSettings& T, SpringEff& e) {
+    std::memcpy(e.strength, info.origStrength, 12);
+    std::memcpy(e.ratio, info.origRatio, 12);
+    std::memcpy(e.travel, info.orig, 12);
+    e.swing = 1.0f;
+    if (info.part < 0) return;
+    const PartTune& pt = T.part[info.part];
+    const int l = LevelOf(T, info.part);
+    if (l == kLevelOff) {
+        e.swing = 0.0f;
+    } else if (l >= 0 && l < kNumLevels) {
+        e.swing = kLevelSwing[l];
+        if (info.presetBone >= 0 && info.instExtra >= 0) {
+            const PresetSpring& s = kPresetBones[info.presetBone].s[kLevelSprings[l]][info.instExtra];
+            std::memcpy(e.strength, s.strength, 12);
+            std::memcpy(e.ratio, s.damping, 12);
+            std::memcpy(e.travel, s.maxDist, 12);
+        }
+    }
+    if (pt.bounce != 1.0f)
+        for (float& x : e.strength) x *= pt.bounce * pt.bounce;
+}
+static const SpringEff& EffOf(ActorView& v, int i, const TuneSettings& T) {
+    if (!v.effDone[i]) {
+        const SpringInfo* info = InfoOf(v, i);
+        if (info) {
+            EffectiveOf(*info, T, v.eff[i]);
+        } else {
+            v.eff[i] = SpringEff{};
+            v.eff[i].swing = 1.0f;
+        }
+        v.effDone[i] = true;
+    }
+    return v.eff[i];
 }
 
 // --- a part's jiggle on its springs.  Per COM axis (the driver's, where the spring clamps its travel): the
 // part's factor, but above 1 never past the release's largest travel (Max physics + Max jiggle; body_shape_data.h).
-// One ceiling for the whole part, the smallest of its bones' (that travel / the installed one, worked out once per
-// record: SpringInfo::ceil), so a part's bones keep their proportions: a ceiling per bone let each bone of the thighs
+// One ceiling for the whole part, the smallest of its bones' (that travel / the one in use: as tuned, else as
+// installed), so a part's bones keep their proportions: a ceiling per bone let each bone of the thighs
 // stop at its own size, and the skin between them stretched up to x1.19 the release's worst (tests\body_shape_stretch.py:
 // 15 installer settings x 7 bodies x 5 motions at 60 fps; one ceiling per part: 8 of 525 runs above it, by 0.09 mm at
 // most, peak 11.59 mm against the release's 11.57).
 static void PartCeilings(ActorView& v) {
+    const TuneSettings& T = Tune();
     for (auto& c : v.partCeil)
         for (float& x : c) x = 1e30f;
     for (int i = 0; i < v.nSprings; ++i) {
         const SpringInfo* info = InfoOf(v, i);
         if (!info || info->part < 0) continue;
-        for (int k = 0; k < 3; ++k)
-            if (info->ceil[k] < v.partCeil[info->part][k]) v.partCeil[info->part][k] = info->ceil[k];
+        const SpringEff& e = EffOf(v, i, T);   // against the travel as tuned (the installed one untuned)
+        for (int k = 0; k < 3; ++k) {
+            const float c = e.travel[k] > 1e-6f && info->maxTravel[k] > e.travel[k] ? info->maxTravel[k] / e.travel[k] : 1.0f;
+            if (c < v.partCeil[info->part][k]) v.partCeil[info->part][k] = c;
+        }
     }
     for (auto& c : v.partCeil)
         for (float& x : c)
@@ -1586,29 +2095,40 @@ static void PartCeilings(ActorView& v) {
     v.ceilReady = true;
 }
 
-static void AxisJiggle(const ActorView& v, int part, float out[3]) {
-    const float j = v.jiggle[part];
-    for (int k = 0; k < 3; ++k) out[k] = j <= 1.0f ? j : (j < v.partCeil[part][k] ? j : v.partCeil[part][k]);
+// the part's jiggle on a spring: the body's (shape, character, outfit) x the level's swing x fSwing
+static float PartJiggle(const ActorView& v, const SpringInfo& info, const SpringEff& e, const TuneSettings& T) {
+    return v.jiggle[info.part] * e.swing * T.part[info.part].swing;
+}
+// ... per COM axis, x the bone's own factor and the part's per direction; above 1 held to the part's ceiling.  Returns
+// whether an axis was held
+static bool AxisJiggleOf(const ActorView& v, const SpringInfo& info, const SpringEff& e, const TuneSettings& T, float out[3]) {
+    const float j = PartJiggle(v, info, e, T) * (info.presetBone >= 0 ? T.bone[info.presetBone] : 1.0f);
+    bool held = false;
+    for (int k = 0; k < 3; ++k) {
+        const float jk = j * T.part[info.part].dir[k];
+        out[k] = jk <= 1.0f ? jk : (jk < v.partCeil[info.part][k] ? jk : v.partCeil[info.part][k]);
+        held |= out[k] < jk;
+    }
+    return held;
 }
 
 // The presets give more travel with less damping (Realistic -> Max: x2.5 vertical travel, x0.6 damping); a body's
 // jiggle moves its damping the same way, never below the release's lowest for that bone (or the record's own if that
-// is lower), never above critical.  The instance's damping (inst+0xC0 = 2 sqrt(strength) x ratio) is per actor; the
-// record (strength, ratio) is shared and stays untouched, so this recomputes from it every frame: at x1 bit for bit
-// the constructor's value.
-static void SetDamping(void* inst, void* data, const SpringInfo& info, float j) {
+// is lower), never above critical.  The instance's damping (inst+0xC0 = 2 sqrt(strength) x ratio) is per actor, so this
+// recomputes it every frame from the spring as tuned (the level's strength and ratio, x fSettle): untuned, at
+// x1, bit for bit the constructor's value.
+static void SetDampingOf(void* inst, const SpringEff& e, const SpringInfo& info, float j, float settle) {
     float kd = 1.0f - g_cfg.jiggleDamping * (0.4f / 1.5f) * (j - 1.0f);
     kd = kd < 0.5f ? 0.5f : (kd > 1.5f ? 1.5f : kd);
-    const float* strength = &At<float>(data, 0x20);
-    const float* ratio = &At<float>(data, 0x30);
+    kd *= settle;
     float c[3];
     for (int k = 0; k < 3; ++k) {
-        if (!(strength[k] > 0) || !(ratio[k] >= 0)) return;   // a record the game itself would choke on: leave it
-        float z = ratio[k] * kd;
+        if (!(e.strength[k] > 0) || !(e.ratio[k] >= 0)) return;   // a record the game itself would choke on: leave it
+        float z = e.ratio[k] * kd;
         z = z < info.dampFloor[k] ? info.dampFloor[k] : z;
-        const float top = ratio[k] > 1.0f ? ratio[k] : 1.0f;
+        const float top = e.ratio[k] > 1.0f ? e.ratio[k] : 1.0f;
         z = z > top ? top : z;
-        c[k] = 2.0f * std::sqrt(strength[k]) * z;
+        c[k] = 2.0f * std::sqrt(e.strength[k]) * z;
     }
     std::memcpy(&At<float>(inst, 0xC0), c, 12);
 }
@@ -1630,24 +2150,48 @@ static float BreastSag(const ActorView& v) {
 static void PreUpdate(ActorView& v) {
     const float dt = *reinterpret_cast<const float*>(g_addr[kFrameTime]);
     if (!(dt > 0.0f && dt < 0.25f) || !v.com) return;
+    const TuneSettings& T = Tune();
+    const bool tuning = T.springs || T.scaled || T.damping;
     // gravity relative to standing, per 1 g, in COM's frame (its world rows are its axes): g_now - g_standing
     const Vec3 rel = {-Row(v.com, 0x80, 0).z, -Row(v.com, 0x80, 1).z, 1.0f - Row(v.com, 0x80, 2).z};
-    // (x each part's gravity factor; the breasts' is in v.size)
-    const float pull[5] = {0.0f, 9.81f * g_cfg.springGravity * BreastSag(v), 9.81f * g_cfg.springGravityBelly * v.gravity[kPartBelly],
-                           9.81f * g_cfg.springGravityButt * v.gravity[kPartButt],
-                           9.81f * g_cfg.springGravityThighs * v.gravity[kPartThigh]};
+    // (x each part's gravity factor; the breasts' is in v.size.  per part, the part's fSag where its
+    // file gives one; the planet's gravity is in the factors)
+    float sagG[kNumParts] = {g_cfg.springGravity, g_cfg.springGravityButt, g_cfg.springGravityBelly, g_cfg.springGravityThighs,
+                             0.0f, 0.0f, 0.0f, 0.0f};
+    static_assert(kPartBreast == 0 && kPartButt == 1 && kPartBelly == 2 && kPartThigh == 3, "sagG lists the parts in order");
+    float pull[kNumParts];
+    for (int p = 0; p < kNumParts; ++p) {
+        if (T.part[p].sag >= 0.0f) sagG[p] = T.part[p].sag;
+        pull[p] = 9.81f * sagG[p] * (p == kPartBreast ? BreastSag(v) : v.gravity[p]);
+    }
     for (int i = 0; i < v.nSprings; ++i) {
         void* inst = v.springs[i];
         void* data = At<void*>(inst, 0x20);
         const SpringInfo* info = InfoOf(v, i);
         if (!info) continue;
+        const SpringEff& e = EffOf(v, i, T);
+        const int part = info->part;
         // the body's jiggle on this spring, per COM axis (its swing is scaled after the update, in
-        // ScaleJiggle), and its damping (per instance; recomputed from the record every frame, so x1 restores it)
+        // ScaleJiggle), and its damping (per instance; recomputed every frame, so x1 restores it)
         float j[3] = {1.0f, 1.0f, 1.0f};
-        if (v.shapeOn && info->part >= 0) {
+        // a record once tuned (its springs or its damping) stays in this path, so taking the tuning out
+        // puts everything back: untuned, the values below are bit for bit the installed ones
+        const bool touched = part >= 0 && info->touched.load(std::memory_order_relaxed);
+        if (part >= 0 && (T.springs || T.damping) && !touched) info->touched.store(true, std::memory_order_relaxed);
+        if (part >= 0 && (v.shapeOn || v.tuned || tuning || touched)) {
             if (!v.ceilReady) PartCeilings(v);
-            AxisJiggle(v, info->part, j);
-            SetDamping(inst, data, *info, v.jiggle[info->part]);
+            AxisJiggleOf(v, *info, e, T, j);
+            SetDampingOf(inst, e, *info, PartJiggle(v, *info, e, T), T.part[part].settle);
+        }
+        // the tuned springs go into the shared record (every body writes the same values, so their order
+        // doesn't matter: the game reads strength and MaxDist from it on every update), and the instance's sub-step
+        // rate follows the strength the way the constructor works it out (0.63662 x the root of the largest)
+        const bool records = part >= 0 && (T.springs || touched);
+        if (records) {
+            float* s = &At<float>(data, 0x20);
+            if (std::memcmp(s, e.strength, 12)) std::memcpy(s, e.strength, 12);
+            const float top = std::fmax(e.strength[0], std::fmax(e.strength[1], e.strength[2]));
+            At<float>(inst, 0xD0) = 0.63662f * std::sqrt(top);
         }
         // the game clamps each axis to MaxDist x (dt / sub-steps); keep that at its 60 fps size at any frame rate
         if (g_cfg.fixedFrameRate) {
@@ -1656,7 +2200,7 @@ static void PreUpdate(ActorView& v) {
             n = n < 1 ? 1 : n;
             const float scale = n / (60.0f * dt);
             float* caps = &At<float>(data, 0x50);
-            for (int k = 0; k < 3; ++k) caps[k] = info->orig[k] * scale;
+            for (int k = 0; k < 3; ++k) caps[k] = e.travel[k] * scale;
             if constexpr (kDiag) {
                 g_springsScaled.fetch_add(1, std::memory_order_relaxed);
                 std::uint32_t bits;
@@ -1665,11 +2209,13 @@ static void PreUpdate(ActorView& v) {
                 std::memcpy(&bits, &dt, 4);
                 g_lastDtBits.store(bits, std::memory_order_relaxed);
             }
+        } else if (records) {   // the tuned travel as it is
+            std::memcpy(&At<float>(data, 0x50), e.travel, 12);
         }
         // gravity: the spring's offset x = goal - simulated, so a pull a on the bone is -a on x'.  The pull never
         // holds a spring against its travel limit: its steady sag (pull / strength) stays within 85% of the 60 fps
         // limit (MaxDist / 60), so the spring still bounces both ways (a bigger size factor pinned the breasts)
-        const float G = pull[info->group];
+        const float G = part >= 0 ? pull[part] : 0.0f;
         if (G > 0.0f) {
             const float* strength = &At<float>(data, 0x20);
             float* vel = &At<float>(inst, 0xB0);
@@ -1679,7 +2225,8 @@ static void PreUpdate(ActorView& v) {
             const int n0 = static_cast<int>(std::ceil(dt * rate)), n = n0 < 1 ? 1 : n0;
             const float perLimit = g_cfg.fixedFrameRate ? 1.0f / 60.0f : dt / static_cast<float>(n);
             for (int k = 0; k < 3; ++k) {
-                const float most = 0.85f * info->orig[k] * perLimit * strength[k];
+                if (j[k] < 0.05f) continue;   // a spring swinging (almost) nothing gets no sag either
+                const float most = 0.85f * e.travel[k] * perLimit * strength[k];
                 // / j: the swing (sag included) comes out x j, so the sag seen is G's (muscular: less swing, a little
                 // more sag); the guard still holds the spring's own sag inside its limit
                 float a = r3[k] * G / j[k];
@@ -1743,6 +2290,7 @@ static void ScaleJiggle(ActorView& v) {
         }
         return false;
     };
+    const TuneSettings& T = Tune();
     for (int i = 0; i < v.nSprings; ++i) {
         void* inst = v.springs[i];
         void* target = At<void*>(inst, 0x18);
@@ -1756,10 +2304,9 @@ static void ScaleJiggle(ActorView& v) {
         it.parent = At<void*>(target, 0x38);   // no parent: the spring doesn't run (0x877910 returns at once)
         if (!it.parent) continue;
         std::memcpy(it.local, static_cast<char*>(target) + 0x70, 12);   // the bone its spring just wrote (live)
-        const float j = v.jiggle[info->part];
-        AxisJiggle(v, info->part, it.j);
-        it.held = it.j[0] < j || it.j[1] < j || it.j[2] < j;
-        const float* o = info->orig;
+        const SpringEff& e = EffOf(v, i, T);   // the spring as tuned, its travel and swing
+        it.held = AxisJiggleOf(v, *info, e, T, it.j);
+        const float* o = e.travel;
         it.most = 1.5f * std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) * per + 0.001f;
         ++n;
     }
@@ -1819,14 +2366,15 @@ static void ScaleJiggle(ActorView& v) {
     }
 }
 
-static bool Neutral(const ActorView& v) {
+static bool Neutral(const ActorView& v) {   // and nothing tuned on every body's swing
     for (int p = 0; p < kNumParts; ++p)
         if (v.jiggle[p] != 1.0f) return false;
-    return true;
+    return !Tune().scaled;
 }
 
 static void PostUpdate(ActorView& v, int site) {
-    if (v.shapeOn && !Neutral(v)) ScaleJiggle(v);   // first: the shapes and collisions below build on the scaled swing
+    // first: the shapes and collisions below build on the scaled swing (a tuned body's too)
+    if ((v.shapeOn || v.tuned || Tune().scaled) && !Neutral(v)) ScaleJiggle(v);
     Anchor* anchors = v.anchors;
     const float level = v.level;
     if (kDiag && g_cfg.enabled) g_gravityActors.fetch_add(1, std::memory_order_relaxed);
@@ -3486,6 +4034,7 @@ static void Collide(ActorView& v) {
 // actorHint: the caller's character, copied into r8 by the thunk (kSiteActor); null on path A or if unchecked
 template <int Site>
 static void Hooked(void* owner, void* referenceNode, void* actorHint) {
+    MaybeReloadTuning();   // every 2 s, the tuning files' times and sizes
     if constexpr (!kDiag) {   // release: the work only
         ActorView view;
         const bool ours = Collect(owner, view);
@@ -3685,6 +4234,47 @@ static void ResolveWorldAddresses(const char* path, std::uint32_t runtime, std::
         else
             Log("world proxies: the filter setter %d / keyframe %d NOT confirmed; nothing is written", setter, keyframe);
     }
+}
+
+// the tuning's three reads (kTuneAddrRef), each confirmed by its function's own bytes; a failure turns only that
+// read off (the character, outfit or planet factors)
+static void ResolveTuneAddresses(const char* path, std::uint32_t runtime, std::uint64_t imageSize) {
+    std::uint32_t ids[kNumTuneAddrs], rvas[kNumTuneAddrs];
+    for (int i = 0; i < kNumTuneAddrs; ++i) ids[i] = kTuneAddrRef[i].id;
+    char why[2 * MAX_PATH];
+    g_gravityScaleOk = g_formIdOk = g_wornOk = false;
+    if (!ReadAddressLibrary(path, runtime, ids, kNumTuneAddrs, rvas, why, sizeof(why))) {
+        Log("tuning: %s; the character, outfit and planet factors are off", why);
+        return;
+    }
+    std::uintptr_t at[kNumTuneAddrs];
+    for (int i = 0; i < kNumTuneAddrs; ++i) {
+        if (static_cast<std::uint64_t>(rvas[i]) >= imageSize) {
+            Log("tuning: ID %u (%s) is outside the game; the character, outfit and planet factors are off", kTuneAddrRef[i].id,
+                kTuneAddrRef[i].what);
+            return;
+        }
+        at[i] = g_base + rvas[i] + kTuneAddrRef[i].off;
+    }
+    static const std::uint8_t kGravity[6] = {0x8B, 0x88, 0x38, 0x11, 0x00, 0x00};   // +0x1B: mov ecx, [rax+0x1138]
+    static const std::uint8_t kFormIdRead[5] = {0x41, 0x8B, 0x40, 0x28, 0xC3};        // mov eax, [r8+0x28]; ret
+    struct Piece { int off; std::uint8_t b[8]; size_t n; };
+    static const Piece kWorn[] = {
+        {0x26, {0x80, 0x78, 0x2E, 0x4B}, 4},                     // cmp byte [rax+0x2E], 0x4B: a character
+        {0x48, {0x48, 0x8B, 0x87, 0xA0, 0x00, 0x00, 0x00}, 7},   // mov rax, [rdi+0xA0]: its inventory
+        {0x54, {0x8B, 0x48, 0x28}, 3},                           // mov ecx, [rax+0x28]: the count
+        {0x5B, {0x48, 0x8B, 0x40, 0x30}, 4},                     // mov rax, [rax+0x30]: the entries
+        {0x5F, {0x48, 0x8D, 0x14, 0x89}, 4},                     // lea rdx, [rcx+rcx*4] ...
+        {0x63, {0x4C, 0x8D, 0x0C, 0xD0}, 4},                     // lea r9, [rax+rdx*8]: 0x28 bytes each
+        {0x74, {0xF6, 0x40, 0x20, 0x07}, 4},                     // test byte [rax+0x20], 7: worn
+        {0x82, {0x41, 0x80, 0x78, 0x2E, 0x22}, 5},               // cmp byte [r8+0x2E], 0x22: an armour
+        {0x9A, {0x49, 0x85, 0x90, 0x08, 0x02, 0x00, 0x00}, 7},   // test [r8+0x208], rdx: its biped slots
+    };
+    g_gravityScaleOk = GameBytesAre(at[kGravityScaleFn] + 0x1B, kGravity, sizeof(kGravity));
+    g_formIdOk = GameBytesAre(at[kGetFormIdFn], kFormIdRead, sizeof(kFormIdRead));
+    bool worn = true;
+    for (const Piece& p : kWorn) worn = worn && GameBytesAre(at[kWornSlotFn] + p.off, p.b, p.n);
+    g_wornOk = worn && g_formIdOk;   // a worn piece is told apart by its form ID too
 }
 
 // The checks read the game at addresses from the database, so every read is guarded: a wrong address fails the check.
@@ -3918,7 +4508,8 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     g_mainThread = GetCurrentThreadId();
     g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
     LoadSettings();
-    Log("TF Physics (logging build: gravity, springs, body shape, collisions, world-collision proxies). "
+    Log("TF Physics (logging build: gravity, springs, body shape, tuning files, collisions, world-collision "
+        "proxies). "
         "SFSE 0x%08X, game %u.%u.%u (runtime 0x%08X)", sfse->sfseVersion, sfse->runtimeVersion >> 24,
         (sfse->runtimeVersion >> 16) & 0xFF, (sfse->runtimeVersion >> 4) & 0xFFF, sfse->runtimeVersion);
     Log("lying also needs the thighs flat: %.0f-%.0f deg from vertical", g_cfg.thighFlatStartDeg, g_cfg.thighFlatFullDeg);
@@ -3952,6 +4543,12 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     if (!CheckGame()) return false;
     CheckSizeReading();
     CheckDeadReading();
+    // the tuning: its reads checked, then the files read (and watched)
+    ResolveTuneAddresses(lib, sfse->runtimeVersion, nt->OptionalHeader.SizeOfImage);
+    LoadTuning(g_tunes[0]);
+    g_tuneNow.store(0);
+    g_tuneStamp = TuneStamp();
+    LogTuning("tuning", g_tunes[0]);
     if (kDiag && g_cfg.proxies) ResolveWorldAddresses(lib, sfse->runtimeVersion, nt->OptionalHeader.SizeOfImage);
     const bool ok = InstallHooks();
     Log(ok ? "hooks installed; logging every 5 s" : "hooks NOT installed");

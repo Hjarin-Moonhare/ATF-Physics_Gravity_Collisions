@@ -611,6 +611,353 @@ int main() {
         }
         g_cfg = Settings{};
     }
+
+    // ================================================================ tuning each part
+    // Written out from the design: a part at a level takes that preset's springs (strength, damping ratio, MaxDist,
+    // per COM axis) at the installed extra-jiggle level, and the level's swing (Minimal x0.25, Lower x0.5, Off x0);
+    // fSwing, the per-direction factors and the bone's own multiply the swing; fSettle multiplies the damping ratio
+    // (floored at the release's lowest, held at critical); fBounceSpeed multiplies the strength by its square; fSag is
+    // the part's gravity in g; a character's, an outfit's (the lowest of the pieces worn) and the planet's factors
+    // multiply the body's.
+    {
+        static float dt9 = 1.0f / 60;
+        g_addr[kFrameTime] = reinterpret_cast<std::uintptr_t>(&dt9);
+        g_cfg = Settings{};
+        g_cfg.collision = false;
+        TuneSettings& T = g_tunes[g_tuneNow.load()];
+        auto tune = [&](auto edit) {
+            T = TuneSettings{};
+            edit(T);
+            TuneFlags(T);
+        };
+        auto untune = [&]() {
+            T = TuneSettings{};
+            TuneFlags(T);
+        };
+        auto bone = [](const char* name) {
+            for (int b = 0; b < kNumPresetBones; ++b)
+                if (!strcmp(kPresetBones[b].name, name)) return b;
+            return -1;
+        };
+        auto same3 = [](const float* a, const float* b, float tol) {
+            return std::fabs(a[0] - b[0]) <= tol && std::fabs(a[1] - b[1]) <= tol && std::fabs(a[2] - b[2]) <= tol;
+        };
+        const PresetSpring& realistic = kPresetBones[bone("TF_Breast_Lower_L")].s[0][0];
+        const PresetSpring& high = kPresetBones[bone("TF_Breast_Lower_L")].s[3][0];
+        const float zero[3] = {0, 0, 0};
+        char* com9 = NewNode("COM");
+        char* pecs9 = NewNode("L_Pecs");
+        {   // which installer setting a record was built with
+            Spring r = NewSpring(com9, pecs9, "TF_Breast_Lower_L", realistic.maxDist, realistic.strength, realistic.damping, zero);
+            Spring h = NewSpring(com9, pecs9, "TF_Breast_Lower_L", high.maxDist, high.strength, high.damping, zero);
+            const float odd[3] = {77, 90, 90};
+            Spring u = NewSpring(com9, pecs9, "TF_Breast_Lower_L", realistic.maxDist, odd, realistic.damping, zero);
+            const PresetSpring& tm = kPresetBones[bone("TF_Thigh_Rear_L")].s[2][1];   // Medium, extra jiggle Normal
+            Spring t = NewSpring(com9, pecs9, "TF_Thigh_Rear_L", tm.maxDist, tm.strength, tm.damping, zero);
+            const SpringInfo* ir = SpringInfoFor(r.data, r.target);
+            const SpringInfo* ih = SpringInfoFor(h.data, h.target);
+            const SpringInfo* iu = SpringInfoFor(u.data, u.target);
+            const SpringInfo* it = SpringInfoFor(t.data, t.target);
+            snprintf(d, sizeof(d), "Realistic %d/%d, High %d/%d, a thigh on Medium + Normal %d/%d, another mod's record %d/%d",
+                     ir->instPreset, ir->instExtra, ih->instPreset, ih->instExtra, it->instPreset, it->instExtra, iu->instPreset,
+                     iu->instExtra);
+            Report("the installer setting found", d, ir->instPreset == 0 && ir->instExtra == 0 && ih->instPreset == 3 &&
+                   it->instPreset == 2 && it->instExtra == 1 && iu->instPreset == -1 && iu->presetBone == bone("TF_Breast_Lower_L"));
+        }
+        {   // a part at High: the record gets High's springs, the instance its damping and sub-step rate; then back
+            Spring s = NewSpring(com9, pecs9, "TF_Breast_Lower_L", realistic.maxDist, realistic.strength, realistic.damping, zero);
+            const float* rs = reinterpret_cast<const float*>(s.data + 0x20);
+            const float* rm = reinterpret_cast<const float*>(s.data + 0x50);
+            const float* c = reinterpret_cast<const float*>(s.inst + 0xC0);
+            const float* rate = reinterpret_cast<const float*>(s.inst + 0xD0);
+            auto update = [&]() {
+                ActorView v;
+                v.com = com9;
+                v.springs[v.nSprings++] = s.inst;
+                PreUpdate(v);
+            };
+            tune([](TuneSettings& t) { t.part[kPartBreast].level = kLevelHigh; });
+            update();
+            const float wantC = 2.0f * std::sqrt(high.strength[2]) * high.damping[2];
+            const bool atHigh = same3(rs, high.strength, 0) && same3(rm, high.maxDist, 1e-6f) && std::fabs(c[2] - wantC) < 1e-5f &&
+                                std::fabs(*rate - 0.63662f * std::sqrt(76.5f)) < 1e-5f;
+            snprintf(d, sizeof(d), "strength %.1f %.1f %.1f, travel %.3f %.3f %.3f, damping %.4f (want %.4f), rate %.4f", rs[0], rs[1],
+                     rs[2], rm[0], rm[1], rm[2], c[2], wantC, *rate);
+            Report("a part at High", d, atHigh);
+            untune();
+            update();
+            const float game0 = (std::sqrt(realistic.strength[2]) + std::sqrt(realistic.strength[2])) * realistic.damping[2];
+            const bool back = same3(rs, realistic.strength, 0) && same3(rm, realistic.maxDist, 1e-6f) && c[2] == game0 &&
+                              *rate == 0.63662f * std::sqrt(90.0f);
+            snprintf(d, sizeof(d), "strength %.1f, travel %.3f, damping %.6f (the constructor's %.6f), rate %.5f", rs[2], rm[2], c[2],
+                     game0, *rate);
+            Report("back as installed", d, back);
+            // a record no installer setting matches keeps its own springs at any level
+            const float odd[3] = {77, 90, 90};
+            Spring u = NewSpring(com9, pecs9, "TF_Breast_Lower_L", realistic.maxDist, odd, realistic.damping, zero);
+            tune([](TuneSettings& t) { t.part[kPartBreast].level = kLevelHigh; });
+            ActorView vu;
+            vu.com = com9;
+            vu.springs[vu.nSprings++] = u.inst;
+            PreUpdate(vu);
+            Report("another mod's record at High", "keeps its own springs",
+                   same3(reinterpret_cast<const float*>(u.data + 0x20), odd, 0) &&
+                       same3(reinterpret_cast<const float*>(u.data + 0x50), realistic.maxDist, 1e-6f));
+            // bounce speed x1.2: strength x1.44, the rate with it; settle x2: the damping ratio x2
+            tune([](TuneSettings& t) {
+                t.part[kPartBreast].bounce = 1.2f;
+                t.part[kPartBreast].settle = 2.0f;
+            });
+            update();
+            const float s144 = realistic.strength[2] * 1.44f;
+            const float wantSettle = 2.0f * std::sqrt(s144) * realistic.damping[2] * 2.0f;
+            snprintf(d, sizeof(d), "strength %.2f (want %.2f), rate %.4f, damping %.4f (want %.4f)", rs[2], s144, *rate, c[2], wantSettle);
+            Report("bounce speed and settle", d, std::fabs(rs[2] - s144) < 1e-4f &&
+                   std::fabs(*rate - 0.63662f * std::sqrt(s144)) < 1e-5f && std::fabs(c[2] - wantSettle) < 1e-4f);
+            untune();
+            update();
+        }
+        {   // the swing: a level's, Off, per direction, per bone
+            auto local = [](const Spring& s) {
+                const float* t = reinterpret_cast<const float*>(s.target + 0x70);
+                return Vec3{t[0], t[1], t[2]};
+            };
+            const PresetSpring& gr = kPresetBones[bone("TF_Glute_Lower_L")].s[0][0];
+            const PresetSpring& br = kPresetBones[bone("TF_Breast_Upper_L")].s[0][0];
+            Spring g = NewSpring(com9, pecs9, "TF_Glute_Lower_L", gr.maxDist, gr.strength, gr.damping, zero);
+            Spring lo = NewSpring(com9, pecs9, "TF_Breast_Lower_L", realistic.maxDist, realistic.strength, realistic.damping, zero);
+            Spring up = NewSpring(com9, pecs9, "TF_Breast_Upper_L", br.maxDist, br.strength, br.damping, zero);
+            const float out[3] = {0.004f, -0.002f, 0.006f};
+            auto swing = [&](std::vector<Spring*> springs) {
+                for (Spring* s : springs) memcpy(s->target + 0x70, out, 12);
+                ActorView v;
+                v.com = com9;
+                for (Spring* s : springs) v.springs[v.nSprings++] = s->inst;
+                PreUpdate(v);
+                for (Spring* s : springs) memcpy(s->target + 0x70, out, 12);   // the spring writes its swing
+                PostUpdate(v, 1);
+            };
+            auto times = [&](const Spring& s, float fx, float fy, float fz) {
+                const Vec3 got = local(s);
+                return std::fabs(got.x - out[0] * fx) < 1e-7f && std::fabs(got.y - out[1] * fy) < 1e-7f &&
+                       std::fabs(got.z - out[2] * fz) < 1e-7f;
+            };
+            bool ok = true;
+            char seen[200] = "";
+            const int levels[3] = {kLevelLower, kLevelMinimal, kLevelOff};
+            const float want[3] = {0.5f, 0.25f, 0.0f};
+            for (int i = 0; i < 3; ++i) {
+                tune([&](TuneSettings& t) { t.part[kPartButt].level = levels[i]; });
+                swing({&g});
+                ok &= times(g, want[i], want[i], want[i]);
+                const size_t len = strlen(seen);
+                snprintf(seen + len, sizeof(seen) - len, "%s x%.2f; ", i == 2 ? "Off" : kLevelName[levels[i]],
+                         (local(g).z) / out[2]);
+            }
+            Report("Lower, Minimal and Off", seen, ok);
+            tune([](TuneSettings& t) { t.allLevel = kLevelLower; t.part[kPartBreast].level = kLevelMax; });
+            swing({&g, &lo});
+            Report("[All] Lower, the breasts Max", "the butt x0.5 (from [All]), the breasts x1 on Max's springs",
+                   times(g, 0.5f, 0.5f, 0.5f) && times(lo, 1, 1, 1) &&
+                       same3(reinterpret_cast<const float*>(lo.data + 0x20), kPresetBones[bone("TF_Breast_Lower_L")].s[4][0].strength, 0));
+            tune([](TuneSettings& t) {
+                t.part[kPartBreast].dir[2] = 0.5f;   // up and down at half
+                t.part[kPartBreast].swing = 0.8f;
+            });
+            swing({&lo, &up});
+            Report("per direction", "the breasts x0.8, up-down x0.5 on top", times(lo, 0.8f, 0.8f, 0.4f) && times(up, 0.8f, 0.8f, 0.4f));
+            tune([&](TuneSettings& t) { t.bone[bone("TF_Breast_Lower_L")] = 0.5f; });
+            swing({&lo, &up});
+            Report("per bone", "TF_Breast_Lower_L x0.5, TF_Breast_Upper_L as installed", times(lo, 0.5f, 0.5f, 0.5f) && times(up, 1, 1, 1));
+            tune([](TuneSettings& t) { t.part[kPartButt].swing = 3.0f; });   // above 1: held per axis to Max + Max's travel
+            swing({&g});
+            const SpringInfo* gi = SpringInfoFor(g.data, g.target);
+            float ceil3[3];
+            for (int k = 0; k < 3; ++k) ceil3[k] = gi->maxTravel[k] / gi->orig[k];   // the body has this one butt spring
+            snprintf(d, sizeof(d), "x3 asked: x%.3f x%.3f x%.3f (Max + Max's travel / Realistic's)", local(g).x / out[0],
+                     local(g).y / out[1], local(g).z / out[2]);
+            Report("more swing than Max", d, times(g, std::fmin(3.0f, ceil3[0]), std::fmin(3.0f, ceil3[1]), std::fmin(3.0f, ceil3[2])));
+            untune();
+        }
+        {   // sag on a part that had none: the hips at 0.05 g, lying on the back
+            const Vec3 onBack[3] = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
+            SetRows(com9, onBack);
+            const float stiff[3] = {1000, 1000, 1000};
+            const PresetSpring& hp = kPresetBones[bone("TF_Hip_Outer_L")].s[0][0];
+            Spring h = NewSpring(com9, pecs9, "TF_Hip_Outer_L", hp.maxDist, stiff, hp.damping, zero);
+            ActorView v0;
+            v0.com = com9;
+            v0.springs[v0.nSprings++] = h.inst;
+            PreUpdate(v0);
+            const float before = reinterpret_cast<const float*>(h.inst + 0xB0)[2];
+            tune([](TuneSettings& t) { t.part[kPartHip].sag = 0.05f; });
+            ActorView v;
+            v.com = com9;
+            v.springs[v.nSprings++] = h.inst;
+            PreUpdate(v);
+            const float* vel = reinterpret_cast<const float*>(h.inst + 0xB0);
+            const float G = 9.81f * 0.05f;
+            snprintf(d, sizeof(d), "none installed (up %.6f), at 0.05 g: fore/aft %.6f up %.6f m/s (want %.6f %.6f)", before, vel[1],
+                     vel[2] - before, G * dt9, -G * dt9);
+            Report("sag on the hips", d, before == 0.0f && std::fabs(vel[1] - G * dt9) < 1e-7f && std::fabs(vel[2] - before + G * dt9) < 1e-7f);
+            untune();
+            const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            SetRows(com9, upright);
+        }
+        {   // per character, per outfit and per planet (the reads on a fake character and record)
+            g_formIdOk = g_wornOk = g_gravityScaleOk = true;
+            auto person = [&](bool player, std::uint32_t ref, std::uint32_t base) {
+                char* actor = static_cast<char*>(calloc(1, 0x1200));
+                char* npc = static_cast<char*>(calloc(1, 0x600));
+                memcpy(actor, player ? &g_playerVt : &g_actorVt, 8);
+                memcpy(actor + 0x98, &npc, 8);
+                memcpy(npc, &g_npcVt, 8);
+                memcpy(actor + 0x28, &ref, 4);
+                memcpy(npc + 0x28, &base, 4);
+                return actor;
+            };
+            auto wear = [](char* actor, std::vector<std::pair<std::uint64_t, std::uint32_t>> pieces, bool worn) {
+                char* inv = static_cast<char*>(calloc(1, 0x40));
+                char* items = static_cast<char*>(calloc(pieces.size() + 1, 0x28));
+                const std::uint32_t count = static_cast<std::uint32_t>(pieces.size());
+                memcpy(inv + 0x28, &count, 4);
+                memcpy(inv + 0x30, &items, 8);
+                for (size_t i = 0; i < pieces.size(); ++i) {
+                    char* form = static_cast<char*>(calloc(1, 0x220));
+                    form[0x2E] = pieces[i].first ? 0x22 : 0x2A;   // an armour, or (no slots) a weapon
+                    memcpy(form + 0x208, &pieces[i].first, 8);
+                    memcpy(form + 0x28, &pieces[i].second, 4);
+                    memcpy(items + i * 0x28, &form, 8);
+                    items[i * 0x28 + 0x20] = worn ? 1 : 0;
+                }
+                memcpy(actor + 0xA0, &inv, 8);
+            };
+            auto factors = [](char* actor) {
+                char* root = static_cast<char*>(calloc(1, 0x400));
+                return BodyFactorsOf(root, actor);
+            };
+            g_cfg.shape = false;
+            g_cfg.sizeScaling = false;
+            g_gravityKnown = false;
+            tune([](TuneSettings& t) {
+                t.planet = false;
+                t.chars[0].player = true;
+                for (float& x : t.chars[0].part) x = 1.0f;
+                t.chars[0].part[kPartBreast] = 0.5f;
+                t.chars[1].id = 0x0001ABCD;
+                for (float& x : t.chars[1].part) x = 0.8f;
+                t.nChars = 2;
+            });
+            const BodyFactors fp = factors(person(true, 0x14, 0x7)), fr = factors(person(false, 0x0001ABCD, 0x99)),
+                              fb = factors(person(false, 0x55, 0x0001ABCD)), fo = factors(person(false, 0x56, 0x98));
+            snprintf(d, sizeof(d), "you: breasts x%.2f butt x%.2f; the NPC by reference x%.2f, by record x%.2f; another x%.2f",
+                     fp.jiggle[kPartBreast], fp.jiggle[kPartButt], fr.jiggle[kPartBelly], fb.jiggle[kPartArm], fo.jiggle[kPartBreast]);
+            Report("per character", d, fp.jiggle[kPartBreast] == 0.5f && fp.jiggle[kPartButt] == 1.0f && fp.tuned &&
+                   fr.jiggle[kPartBelly] == 0.8f && fb.jiggle[kPartArm] == 0.8f && fo.jiggle[kPartBreast] == 1.0f && !fo.tuned);
+            tune([](TuneSettings& t) {
+                t.planet = false;
+                t.outfits[0].slots = 1ull << 35;   // a spacesuit's upper body
+                for (float& x : t.outfits[0].part) x = 1.0f;
+                t.outfits[0].part[kPartBreast] = 0.5f;
+                t.outfits[0].part[kPartButt] = 0.6f;
+                t.outfits[1].slots = 1ull << 3;    // clothes
+                for (float& x : t.outfits[1].part) x = 1.0f;
+                t.outfits[1].part[kPartBreast] = 0.8f;
+                t.outfits[1].part[kPartBelly] = 0.9f;
+                t.outfits[2].form = 0x222;         // one particular armour: its own section, not the slots'
+                for (float& x : t.outfits[2].part) x = 1.0f;
+                t.outfits[2].part[kPartBelly] = 0.95f;
+                t.nOutfits = 3;
+            });
+            char* dressed = person(false, 0x60, 0x61);
+            wear(dressed, {{1ull << 35 | 1ull << 39, 0x111}, {1ull << 3 | 1ull << 7, 0x222}, {0, 0x333}}, true);
+            char* clothes = person(false, 0x62, 0x63);
+            wear(clothes, {{1ull << 3, 0x444}}, true);
+            char* bare = person(false, 0x64, 0x65);
+            wear(bare, {{1ull << 35, 0x555}}, false);   // a spacesuit carried, not worn
+            const BodyFactors fd = factors(dressed), fc = factors(clothes), fn = factors(bare);
+            snprintf(d, sizeof(d), "suit + its own clothes: breasts x%.2f butt x%.2f belly x%.2f; clothes: breasts x%.2f belly x%.2f; "
+                     "carried only: x%.2f", fd.jiggle[kPartBreast], fd.jiggle[kPartButt], fd.jiggle[kPartBelly], fc.jiggle[kPartBreast],
+                     fc.jiggle[kPartBelly], fn.jiggle[kPartBreast]);
+            Report("per outfit", d, fd.jiggle[kPartBreast] == 0.5f && fd.jiggle[kPartButt] == 0.6f && fd.jiggle[kPartBelly] == 0.95f &&
+                   fc.jiggle[kPartBreast] == 0.8f && fc.jiggle[kPartBelly] == 0.9f && fn.jiggle[kPartBreast] == 1.0f && !fn.tuned);
+            tune([](TuneSettings& t) { t.planet = true; });
+            char* you = person(true, 0x14, 0x7);
+            const float low = 0.4f;
+            memcpy(you + 0x1138, &low, 4);
+            const BodyFactors fy = factors(you), fz = factors(person(false, 0x70, 0x71));
+            tune([](TuneSettings& t) {
+                t.planet = true;
+                t.planetAmount = 0.5f;
+            });
+            const BodyFactors fh = factors(person(false, 0x72, 0x73));
+            snprintf(d, sizeof(d), "at 0.4 g: your gravity x%.2f, an NPC's x%.2f; half of it: x%.2f", fy.gravity[kPartBreast],
+                     fz.gravity[kPartBelly], fh.gravity[kPartThigh]);
+            Report("per planet", d, std::fabs(fy.gravity[kPartBreast] - 0.4f) < 1e-6f && std::fabs(fz.gravity[kPartBelly] - 0.4f) < 1e-6f &&
+                   std::fabs(fh.gravity[kPartThigh] - 0.7f) < 1e-6f && fy.tuned);
+            g_gravityKnown = false;
+            g_formIdOk = g_wornOk = g_gravityScaleOk = false;
+            g_cfg = Settings{};
+            g_cfg.collision = false;
+            untune();
+        }
+        {   // the files: TFPhysics.ini [Tuning] and the TFPhysics folder, garbage held in range, read again on a change
+            char saved[MAX_PATH];
+            strcpy_s(saved, g_iniPath);
+            char base[MAX_PATH], dir[MAX_PATH];
+            snprintf(base, sizeof(base), "%s\\build\\tests\\tune_test", path);
+            CreateDirectoryA(base, nullptr);
+            snprintf(g_iniPath, sizeof(g_iniPath), "%s\\TFPhysics.ini", base);
+            TuneDir(dir, sizeof(dir));
+            CreateDirectoryA(dir, nullptr);
+            auto put = [&](const char* name, const char* text) {
+                char file[MAX_PATH];
+                snprintf(file, sizeof(file), "%s\\%s", name[0] == '.' ? base : dir, name[0] == '.' ? name + 1 : name);
+                FILE* f = nullptr;
+                fopen_s(&f, file, "wb");
+                fputs(text, f);
+                fclose(f);
+            };
+            put(".TFPhysics.ini", "[Tuning]\r\nbPlanetGravity=0\r\nfPlanetGravity=7\r\nbOutfits=1\r\n");
+            put("All.ini", "[All]\r\nsLevel=Lower\r\n");
+            put("Breasts.ini", "[Breasts]\r\nsLevel=High\r\nfSwing=1.2\r\nfUpDown=0.5\r\nfSettle=2\r\nfBounceSpeed=1.1\r\nfSag=0.08\r\n"
+                "TF_Breast_Lower_L=0.7\r\nTF_Glute_Lower_L=0.1\r\n");
+            put("Butt.ini", "[Butt]\r\nsLevel=Banana\r\nfSwing=nan\r\nfBounceSpeed=9\r\n");
+            put("Outfits.ini", "[Outfit Spacesuit upper]\r\nsSlots=35, 36\r\nfBreasts=0.5\r\n[Outfit My suit]\r\nsForm=0001A2B3\r\n"
+                "fAll=0.7\r\n[Outfit nothing]\r\nfAll=0.1\r\n");
+            put("Characters.ini", "[Player]\r\nfBreasts=1.3\r\n[NPC 0001ABCD]\r\nfAll=0.8\r\n[NPC zz]\r\nfAll=0.2\r\n");
+            TuneSettings& t = g_tunes[g_tuneNow.load()];
+            LoadTuning(t);
+            const PartTune& b = t.part[kPartBreast];
+            const PartTune& u = t.part[kPartButt];
+            const bool read = t.files == 5 && t.allLevel == kLevelLower && b.level == kLevelHigh && b.swing == 1.2f && b.dir[2] == 0.5f &&
+                              b.settle == 2.0f && b.bounce == 1.1f && b.sag == 0.08f && t.bone[bone("TF_Breast_Lower_L")] == 0.7f &&
+                              t.bone[bone("TF_Glute_Lower_L")] == 1.0f && u.level == kLevelPreset && LevelOf(t, kPartButt) == kLevelLower &&
+                              u.swing == 0.0f && u.bounce == 2.0f && !t.planet && t.planetAmount == 1.0f && t.outfitsOn &&
+                              t.nOutfits == 2 && t.outfits[0].slots == (1ull << 35 | 1ull << 36) && t.outfits[1].form == 0x1A2B3 &&
+                              t.outfits[1].part[kPartCalf] == 0.7f && t.nChars == 2 && t.chars[0].player &&
+                              t.chars[0].part[kPartBreast] == 1.3f && t.chars[1].id == 0x1ABCD && t.springs && t.scaled && t.damping;
+            snprintf(d, sizeof(d), "%d files (%s); breasts %s x%.1f, the butt's level from [All], garbage held", t.files, t.fileNames,
+                     b.level == kLevelHigh ? "High" : "WRONG", b.swing);
+            Report("the tuning files", d, read);
+            g_cfg.tuneReload = true;
+            g_tuneStamp = TuneStamp();
+            g_tuneCheckMs = 0;
+            const int before = g_tuneNow.load();
+            MaybeReloadTuning();
+            const bool still = g_tuneNow.load() == before;   // nothing changed: not read again
+            put("Breasts.ini", "[Breasts]\r\nsLevel=Low\r\n");
+            g_tuneCheckMs = 0;
+            MaybeReloadTuning();
+            const bool again = g_tuneNow.load() != before && Tune().part[kPartBreast].level == kLevelLow &&
+                               Tune().part[kPartBreast].swing == 1.0f && Tune().allLevel == kLevelLower;
+            Report("read again on a change", "unchanged: kept; Breasts.ini edited: the other copy read and swapped in", still && again);
+            strcpy_s(g_iniPath, saved);
+            g_tunes[0] = TuneSettings{};
+            g_tunes[1] = TuneSettings{};
+            g_tuneNow = 0;
+        }
+    }
     FlushLog();
     printf("%s\n", g_fails ? "SOME CASES FAILED" : "all cases passed");
     return g_fails;

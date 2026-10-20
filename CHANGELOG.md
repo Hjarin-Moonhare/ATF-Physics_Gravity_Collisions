@@ -4,6 +4,14 @@ Releases are the builds A-Body ships.
 
 ## Development (this source)
 
+- **Tuning files** (`Data\SFSE\Plugins\TFPhysics\*.ini`, every build; [docs/TUNING.md](docs/TUNING.md)):
+  - each of the 8 parts takes any physics preset's springs at the installed extra jiggle, Lower or Minimal
+    (Realistic's with half and a quarter of the swing), or Off;
+  - per part: the swing, per direction and per bone, settle, bounce speed and sag;
+  - factors per character (`[Player]`, `[NPC <ID>]`), per outfit (`[Outfit]`, by biped slots or form ID) and for the
+    planet's gravity (`[Tuning] bPlanetGravity`);
+  - read again within 2 s of a change (`[Tuning] bReload`);
+  - `tests\tune_dump.cpp` prints how they're read.
 - **World collision** (logging build only):
   - the proxies' layer is set back to 62 at runtime;
   - your character's proxies are steered every frame with the game's keyframe function;

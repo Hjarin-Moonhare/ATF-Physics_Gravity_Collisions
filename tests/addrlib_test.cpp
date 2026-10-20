@@ -1,5 +1,6 @@
 // Offline test of the game addresses through the Address Library: the plugin's own database reader
-// (ReadAddressLibrary), address resolution (ResolveAddresses) and start-up checks (CheckGame, CheckSizeReading), on fake
+// (ReadAddressLibrary), address resolution (ResolveAddresses) and start-up checks (CheckGame, CheckSizeReading, the
+// tuning's reads in ResolveTuneAddresses), on fake
 // versionlib files and a fake game image laid out here with the bytes read from Starfield.exe 1.16.244:
 //   - lookups give the RVAs written, from the path SFSE itself checks;
 //   - a missing file, another format, another game version, a cut-short file, an ID past the end or with no address,
@@ -299,7 +300,7 @@ int main(int argc, char** argv) {
         snprintf(d, sizeof(d), "version %u, address bits 0x%X, layout bits 0x%X, list {0x%08X, 0x%X}", v.pluginVersion,
                  v.addressIndependence, v.structureIndependence, v.compatibleVersions[0], v.compatibleVersions[1]);
         Report("SFSE: loads on any game with its database", d,
-               v.dataVersion == 1 && v.pluginVersion == 18 && addressFree && layoutFree && needsDb && !v.reservedBreaking &&
+               v.dataVersion == 1 && v.pluginVersion == 19 && addressFree && layoutFree && needsDb && !v.reservedBreaking &&
                    v.compatibleVersions[0] == kRuntime_1_16_244 && !v.compatibleVersions[1] && !strcmp(v.name, "TF Physics"));
         char p1[MAX_PATH], p2[MAX_PATH];
         AddressLibraryPath(kRuntime_1_16_244, p1, sizeof(p1));
@@ -519,6 +520,75 @@ int main(int argc, char** argv) {
         snprintf(d, sizeof(d), "resolved %d/%d, CheckGame %d/%d, no crash", r1, r2, g1, g2);
         Report("unreadable address: the check fails", d, r1 && r2 && !g1 && !g2);
     }
+    {
+        // the tuning's three reads (ResolveTuneAddresses), on a small image of their own: each function in its own slot
+        // with the bytes it checks as read from 1.16.244 (GetPlayerGravityScale +0x1B, the GetFormID native, nine pieces
+        // of WornCoversBipedSlot), and an unreadable page at the end
+        const std::uint64_t tsize = 0x18000;
+        char* timg = static_cast<char*>(VirtualAlloc(nullptr, tsize, MEM_RESERVE, PAGE_NOACCESS));
+        VirtualAlloc(timg, 0x17000, MEM_COMMIT, PAGE_READWRITE);
+        const std::uint32_t trva[kNumTuneAddrs] = {0x10000, 0x12000, 0x14000};
+        FakeDb t;
+        t.count = kMaxId + 1;
+        t.rvas.assign(kMaxId + 1, 0);
+        for (int i = 0; i < kNumTuneAddrs; ++i) t.rvas[kTuneAddrRef[i].id] = trva[i];
+        const std::string tdb = WriteDb("tune_versionlib.bin", t);
+        const std::uintptr_t tb = reinterpret_cast<std::uintptr_t>(timg);
+        const std::uintptr_t grav = tb + trva[kGravityScaleFn] + 0x1B, form = tb + trva[kGetFormIdFn],
+                             worn = tb + trva[kWornSlotFn];
+        Put(grav, {0x8B, 0x88, 0x38, 0x11, 0x00, 0x00});
+        Put(form, {0x41, 0x8B, 0x40, 0x28, 0xC3});
+        Put(worn + 0x26, {0x80, 0x78, 0x2E, 0x4B});
+        Put(worn + 0x48, {0x48, 0x8B, 0x87, 0xA0, 0x00, 0x00, 0x00});
+        Put(worn + 0x54, {0x8B, 0x48, 0x28});
+        Put(worn + 0x5B, {0x48, 0x8B, 0x40, 0x30});
+        Put(worn + 0x5F, {0x48, 0x8D, 0x14, 0x89});
+        Put(worn + 0x63, {0x4C, 0x8D, 0x0C, 0xD0});
+        Put(worn + 0x74, {0xF6, 0x40, 0x20, 0x07});
+        Put(worn + 0x82, {0x41, 0x80, 0x78, 0x2E, 0x22});
+        Put(worn + 0x9A, {0x49, 0x85, 0x90, 0x08, 0x02, 0x00, 0x00});
+        const std::uintptr_t savedBase = g_base;
+        g_base = tb;
+        auto tune = [&](const std::string& db) { ResolveTuneAddresses(db.c_str(), kRuntime_1_16_244, tsize); };
+        tune(tdb);
+        const bool all = g_gravityScaleOk && g_formIdOk && g_wornOk;
+        Report("the tuning reads on the fake image", all ? "gravity scale, form ID, worn items: all three pass" : "missed", all);
+        // each one-byte change fails only its own read (a changed form ID read fails the worn read too: it needs both)
+        struct Range { std::uintptr_t at; size_t n; int which; };   // which: 0 gravity scale, 1 form ID, 2 worn items
+        const Range ranges[] = {{grav, 6, 0},        {form, 5, 1},        {worn + 0x26, 4, 2}, {worn + 0x48, 7, 2},
+                                {worn + 0x54, 3, 2}, {worn + 0x5B, 4, 2}, {worn + 0x5F, 4, 2}, {worn + 0x63, 4, 2},
+                                {worn + 0x74, 4, 2}, {worn + 0x82, 5, 2}, {worn + 0x9A, 7, 2}};
+        int n = 0, failed = 0;
+        for (const Range& r : ranges)
+            for (size_t k = 0; k < r.n; ++k, ++n) {
+                auto* p = reinterpret_cast<std::uint8_t*>(r.at + k);
+                *p ^= 0x5A;
+                tune(tdb);
+                const bool ok[3] = {g_gravityScaleOk, g_formIdOk, g_wornOk};
+                bool right = !ok[r.which];
+                for (int w = 0; w < 3; ++w)
+                    if (w != r.which && !(r.which == 1 && w == 2)) right = right && ok[w];
+                failed += right;
+                *p ^= 0x5A;
+            }
+        tune(tdb);
+        const bool back = g_gravityScaleOk && g_formIdOk && g_wornOk;
+        snprintf(d, sizeof(d), "%d of %d one-byte changes fail only their read (gravity scale 6, form ID 5, worn items 42)",
+                 failed, n);
+        Report("changed: what the tuning reads read", d, failed == n && n == 53 && back);
+        // the worn-items function in the unreadable page: that read is off, no crash; an ID outside the image: all off
+        t.rvas[kTuneAddrRef[kWornSlotFn].id] = 0x17000;
+        tune(WriteDb("tune_versionlib.bin", t));
+        const bool unreadable = g_gravityScaleOk && g_formIdOk && !g_wornOk;
+        t.rvas[kTuneAddrRef[kWornSlotFn].id] = 0x20000;
+        tune(WriteDb("tune_versionlib.bin", t));
+        const bool outside = !g_gravityScaleOk && !g_formIdOk && !g_wornOk;
+        Report("the tuning reads: bad addresses",
+               "unreadable: the worn read off, the other two pass; outside the image: all off", unreadable && outside);
+        g_base = savedBase;
+        g_gravityScaleOk = g_formIdOk = g_wornOk = false;
+        VirtualFree(timg, 0, MEM_RELEASE);
+    }
 
     // ================================================================ the real game (read only)
     char exe[MAX_PATH];
@@ -572,13 +642,16 @@ int main(int argc, char** argv) {
             if (resolved) CheckDeadReading();   // Actor::IsDead through slot 269 of both vtables
             g_proxyOk = false;
             if (resolved) ResolveWorldAddresses(db, runtime, imageSize);   // the proxy watch's classes
+            g_gravityScaleOk = g_formIdOk = g_wornOk = false;
+            if (resolved) ResolveTuneAddresses(db, runtime, imageSize);   // the tuning's three reads
             snprintf(d, sizeof(d), "resolved %d, CheckGame %d (paths B %d, C %d), size reading %d, triangle %d, life state %d, "
-                     "world proxies %d (writes %d, motion tables %d) (mapped in %.1f s)", resolved, installs, g_siteActorOk[1],
-                     g_siteActorOk[2], g_actorVt != 0, g_triangleOk, g_deadOk, g_proxyOk, g_proxyWriteOk, g_proxyMotionOk,
+                     "world proxies %d (writes %d, motion tables %d), tuning reads %d %d %d (mapped in %.1f s)", resolved,
+                     installs, g_siteActorOk[1], g_siteActorOk[2], g_actorVt != 0, g_triangleOk, g_deadOk, g_proxyOk,
+                     g_proxyWriteOk, g_proxyMotionOk, g_gravityScaleOk, g_formIdOk, g_wornOk,
                      static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(fq.QuadPart));
             Report("real Starfield.exe: every check passes", d,
                    installs && g_siteActorOk[1] && g_siteActorOk[2] && g_actorVt && g_triangleOk && g_deadOk && g_proxyOk &&
-                       g_proxyWriteOk && g_proxyMotionOk);
+                       g_proxyWriteOk && g_proxyMotionOk && g_gravityScaleOk && g_formIdOk && g_wornOk);
             VirtualFree(img, 0, MEM_RELEASE);
         } else {
             Report("real Starfield.exe: every check passes", "could not read it", false);

@@ -3,7 +3,8 @@ rem Builds and runs the offline tests against the plugin's own code. No game nee
 rem   collide_test.cpp  collisions on A-Body's skeleton in 10 poses, other bodies, dead bodies, the world proxies
 rem                     (against stand-ins for the game's Havok functions)
 rem   gravity_test.cpp  gravity shapes, spring gravity per part, the breast size reading, the INI
-rem   shape_test.cpp    body-shape physics: reading, factors, damping, spring gravity, swing scaling
+rem   shape_test.cpp    body-shape physics: reading, factors, damping, spring gravity, swing scaling, tuning each part
+rem   tune_dump.cpp     how a TFPhysics.ini and its tuning files are read (tune_dump.exe path\to\TFPhysics.ini)
 rem   addrlib_test.cpp  the Address Library reader and every start-up check, on a fake game image; with the game found
 rem                     (the first argument, else STARFIELD_DIR, else the usual Steam folders) also on the real
 rem                     Starfield.exe, read from disk (read only)
@@ -19,5 +20,7 @@ build\tests\gravity_test.exe || exit /b 1
 cl /nologo /std:c++20 /O2 /MT /EHsc /W4 tests\shape_test.cpp /Fo:build\tests\ /Fe:build\tests\shape_test.exe /link /NOLOGO shell32.lib ole32.lib || exit /b 1
 copy /y config\TFPhysics.ini build\tests\TFPhysics.ini >nul
 build\tests\shape_test.exe || exit /b 1
+cl /nologo /std:c++20 /O2 /MT /EHsc /W4 tests\tune_dump.cpp /Fo:build\tests\ /Fe:build\tests\tune_dump.exe /link /NOLOGO shell32.lib ole32.lib || exit /b 1
+build\tests\tune_dump.exe config\TFPhysics.ini >nul || exit /b 1
 cl /nologo /std:c++20 /O2 /MT /EHsc /W4 tests\addrlib_test.cpp /Fo:build\tests\ /Fe:build\tests\addrlib_test.exe /link /NOLOGO shell32.lib ole32.lib || exit /b 1
 build\tests\addrlib_test.exe %1
