@@ -78,8 +78,25 @@ Library IDs. Offsets are in bytes. For an ID's RVA in the installed game: `pytho
 - `+0xB08` the step lock, and `+0xB20` the world lock (section 6);
 - `+0xB60` the command queue (section 3).
 
-`bhkWorld+0x7E4` holds the seconds the next physics update simulates: ID 125014 writes it as the leftover at +0x7DC
-plus the frame's time. In game it reads about 0.017.
+**The physics timer** (ID 125014 `(bhkWorld*, frame time)`, once a frame for each world):
+
+| Offset | What |
+|---|---|
+| +0x7CA | fixed substeps (a byte) |
+| +0x7CC | the frame's time |
+| +0x7D4 | the substep |
+| +0x7DC | the leftover after this update |
+| +0x7E0 | the leftover before it |
+| +0x7E4 | the leftover before it + the frame's time, in seconds |
+| +0x7E8 | this update's substeps: the whole ones that fit in +0x7E4, at most +0x800 |
+
+- With fixed substeps the update simulates n substeps and the leftover is +0x7E4 - n x substep; without, the
+  leftover is 0.
+- In game +0x7E4 ranges from about one frame's time to one frame + 17 ms (confirmed in game).
+- For minutes at a time it holds no usable step (outside 0.1 ms to 250 ms) while the player's update keeps
+  running and the player stands still: the game paused, in a menu or photo mode (confirmed in game).
+- For the main worlds ID 99406 runs it (through IDs 99403 and 124990) before ID 99392 builds the frame's job graph.
+  ID 91213 runs it for the menus' 3D worlds (BarterMenu, ChargenMenu).
 
 ## 3. Changing bodies: the command queue
 
@@ -93,7 +110,11 @@ If it can, the wrapper writes at once, holding the world lock shared (ID 123862)
 | ApplyHardKeyframe | 125080 | ID 125101 | `bhkApplyHardKeyframe` (ID 126179) |
 | SetMotionType | 125083 | ID 125100 | `bhkSetBodyMotionTypeCmd` (ID 126167) |
 
-- ID 125101 checks the body ID and the body's flag at +0x88.
+- ID 125101 checks the body ID and the body's byte at +0x88: clear = write at once. ID 125100 asks the same of every
+  body on the body's motion (the ring through body+0x84, through the world's slot 12, ID 125225).
+- SetBodyTransform and SetBodyVelocity take a last byte that queues the change whatever the flag (ID 125392 passes 0).
+- The at-once write holds the world lock shared only, which `bhkWorld::Update` holds shared for the whole update, so
+  it doesn't wait for an update running on another thread.
 - SetBodyVelocity's direct path calls Havok's `setBodyVelocity` (ID 160867). A non-zero velocity also activates the
   body (ID 125063).
 - **More commands.** RTTI lists 50 of them as `bhkCommandQueue::...::Ubhk<Name>`, among them:
@@ -105,7 +126,7 @@ If it can, the wrapper writes at once, holding the world lock shared (ID 123862)
     42784): freeing goes through the queue too.
 - **The queue always defers.** Its constructor (ID 126102) sets its defer flag (+0x1D8) to 1, and nothing else in the
   bhk code (IDs 124950-126400) writes it.
-- **Any thread can queue:** commands go in with atomic operations.
+- **Any thread can queue:** commands go into a lock-free list (an atomic exchange of its tail).
 - **The flush** is inside `bhkWorld::Update` (ID 125011), before the step: `ProcessCmdBuffers`, with tasks from ID 125062
   and the work in `bhkCommandQueue::ProcessCommands` (ID 126156).
 - **Havok's own guard.** Its `checkNotInSimulation` assert (string ID 396773) sits only in world-changing code: ten
@@ -118,10 +139,13 @@ If it can, the wrapper writes at once, holding the world lock shared (ID 123862)
 **Keyframe a collision object, with a warp** (ID 125392): `(co, float transform[16], float stepSeconds, bool* warped)`.
 - **The transform:** the rotation rows with w = 0, then the position with w = 1, as the game's node update (ID 125360)
   builds it.
-- **The step:** `[bhkWorld+0x7E4]`, in seconds, not 1/dt (confirmed in game).
+- **The step:** in seconds, not 1/dt (confirmed in game). The game's node update passes `[bhkWorld+0x7E4]`; with fixed
+  substeps the update simulates only n x substep of it (section 2), so a body keyframed that way covers that share of
+  its gap each update and trails a moving target (confirmed in game). TF Physics passes n x substep.
 - **What it does:**
   1. it holds the world lock shared (ID 43095) while it works;
-  2. it works out the velocity that reaches the target in one step: the gap × 1/step (ID 161979);
+  2. it works out the velocities (linear and angular) that reach the target in one step: the gap × 1/step, from the
+     body's position at +0x30 plus +0x40 (ID 161979);
   3. under both of the motion-properties entry's limits (+0x10, +0x14), it sets that velocity (SetBodyVelocity, ID
      125073);
   4. over either one, it sets the transform (SetBodyTransform, ID 125070) with velocity 0, and sets `*warped`.
@@ -136,7 +160,7 @@ objects) and ID 124725.
   and +0x70.
 - The keyframe function warps only above the motion-properties entry's limits.
 - A body that needs more speed than its motion's own limit, but less than the entry's, neither keeps up nor warps: it
-  trails its target (confirmed in game).
+  trails its target.
 
 **A warp on demand:** with a step of 1 ns, any visible gap needs more speed than any entry allows, so the keyframe
 function takes its warp path: the body is placed, with velocity 0 (confirmed in game).
@@ -235,9 +259,11 @@ function takes its warp path: the body is placed, with velocity 0 (confirmed in 
 - The add puts them on layer 8 (`L_BIPED`), whatever their data says.
 - A filter set afterwards through the object's SetCollisionFilterInfo (slot 63, +0x1F8, ID 125374; queued as
   `bhkSetBodyFilterInfo`) holds.
-- They get the game's motion properties, not the ones in their NIF data: entry 17 of the table's 80, with 100 m/s,
-  200 rad/s, gravity factor 1 and damping 0 / 0.1. Their motions' own limits are 100 m/s and 200 rad/s too.
-- Two of them, in two separate one-body systems under `L_Pecs` and `R_Pecs`, report the same motion index.
+- They get the game's motion properties, not the ones in their NIF data. The entry depends on the world (16 or 17 of
+  80 outside, 9 of 16 in an interior), always with 100 m/s, 200 rad/s, gravity factor 1 and damping 0 / 0.1. Their
+  motions' own limits are 100 m/s and 200 rad/s too.
+- Two of them, in two separate one-body systems under `L_Pecs` and `R_Pecs`, are on the `C_Chest` ragdoll body's
+  motion: one motion for the three, its centre of mass about 15 cm from each body. A keyframe on one moves all three.
 - The living character's `C_Chest` ragdoll body is in the world, and keyframed.
 
 ## 8. What moves a body on a node
@@ -563,3 +589,7 @@ Havok data in NIFs is `TAG0`, SDK 2019.2.
     (30): a body on it gets shot, nudges the camera and shoves passers-by.
 14. **Struct offsets aren't in the Address Library.** `actor+0xB0`, `world+0xB20`, `node+0x110`, `bhkWorld+0x7E4` and
     the rest need a byte check where they're read, or a fresh look after each patch.
+15. **The proxies ride on the ragdoll's motion.** A keyframe or warp on a proxy moves the `C_Chest` ragdoll body too.
+    When the game makes that motion dynamic (a ragdoll), a steer would pull the ragdoll's chest to the animated pose.
+16. **Keyframing with `[bhkWorld+0x7E4]` under fixed substeps undershoots.** The update simulates whole substeps
+    only, so the body covers 0-100 % of each gap and trails anything that moves.

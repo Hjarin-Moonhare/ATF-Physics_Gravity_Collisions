@@ -553,9 +553,11 @@ int main() {
         keysFile &= g_cfg.proxies;   // [World] bProxies=1 in the test INI
         keysFile &= g_cfg.proxyLayer && g_cfg.proxyInert && g_cfg.steer;
         keysFile &= GetPrivateProfileStringA("World", "fProxyMaxSpeed", "missing", got, sizeof(got), g_iniPath) &&
-                  !strcmp(got, "10") && g_cfg.proxyMaxSpeed == 10.0f;
+                  !strcmp(got, "20") && g_cfg.proxyMaxSpeed == 20.0f;   // the cap, 20 m/s
         keysFile &= GetPrivateProfileStringA("World", "bSteerOnce", "missing", got, sizeof(got), g_iniPath) &&
                   !strcmp(got, "1") && g_cfg.steerOnce;
+        keysFile &= GetPrivateProfileStringA("World", "iSteerTime", "missing", got, sizeof(got), g_iniPath) &&
+                  !strcmp(got, "1") && g_cfg.steerTime == 1;
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&
                         g_cfg.slump == 1.0f && g_cfg.springGravity == 0.06f && g_cfg.springGravityBelly == 0.03f &&
                         g_cfg.springGravityButt == 0.04f && g_cfg.springGravityThighs == 0.0f && g_cfg.sizeScaling &&

@@ -104,7 +104,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 17, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 18, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -348,8 +348,12 @@ struct Settings {
     bool proxyLayer = false;      // set every A-Body body's proxies to layer 62 ([World] bProxyLayer)
     bool proxyInert = true;       // ... and "collide with nothing" (bit 14) on top ([World] bProxyInert)
     bool steer = false;           // ... and steer the player's proxies each frame ([World] bSteer)
-    float proxyMaxSpeed = 10.0f;  // needing more (m/s), a proxy is warped, not moved ([World] fProxyMaxSpeed)
+    float proxyMaxSpeed = 20.0f;  // needing more (m/s), a proxy is warped, not moved ([World] fProxyMaxSpeed)
     bool steerOnce = true;        // two proxies on one motion: steer it once a frame ([World] bSteerOnce)
+    // the time the speed is asked for ([World] iSteerTime): 0 = the timer's whole time (leftover + frame, the
+    // game's own keyframe time), 1 = the substeps the physics simulates, this update's or the next one's as measured,
+    // 2 = this update's, 3 = the next update's (predicted)
+    int steerTime = 1;
     bool collision = true;        // hands, arms, thighs and the other breast push the soft bones
     bool measureOnly = false;     // find and log contacts (and position snapshots) but push nothing
     bool innerThighs = false;     // the inner-thigh group (in game it only met legs standing close together)
@@ -431,6 +435,8 @@ static void LoadSettings() {
     g_cfg.steer = GetPrivateProfileIntA("World", "bSteer", 0, g_iniPath) != 0;
     g_cfg.proxyMaxSpeed = readS("World", "fProxyMaxSpeed", g_cfg.proxyMaxSpeed, 1.0f, 50.0f);
     g_cfg.steerOnce = GetPrivateProfileIntA("World", "bSteerOnce", 1, g_iniPath) != 0;
+    const UINT steerTime = GetPrivateProfileIntA("World", "iSteerTime", 1, g_iniPath);
+    g_cfg.steerTime = steerTime <= 3 ? static_cast<int>(steerTime) : 1;
     g_cfg.collision = GetPrivateProfileIntA("Collision", "bEnabled", 1, g_iniPath) != 0;
     auto readC = [](const char* key, float def) {
         char b[64];
@@ -511,8 +517,9 @@ static std::atomic<std::uint32_t> g_proxyDistMm[2];
 static std::atomic<std::uint64_t> g_proxySets{0}, g_proxySetFails{0}, g_proxySteers{0}, g_proxyWarps{0};
 static std::atomic<std::uint32_t> g_proxyLagMm[2], g_proxyStepMm[2];
 // why a steer was skipped: [0] no body or world, [1] not on layer 62 yet, [2] no anchor or not its four bones,
-// [3] no usable step time; and the step time seen (0.1 ms units)
-static std::atomic<std::uint64_t> g_proxySkips[4];
+// [3] no usable step time, [4] not keyframed: the game made the motion dynamic (a ragdoll); and the step time seen (0.1 ms
+// units)
+static std::atomic<std::uint64_t> g_proxySkips[5];
 static std::atomic<std::uint32_t> g_proxyStepMin{0xFFFFFFFFu}, g_proxyStepMax{0};
 // steers that moved a proxy with velocity / warps TF Physics asked for (over the cap) and, of those, ones the
 // game didn't report as warps; the largest speed asked, the largest the bodies had (mm/s); the cap last used (mm/s); the
@@ -525,10 +532,29 @@ static std::atomic<std::uint32_t> g_proxyAskedMmS{0}, g_proxyBodyMmS{0}, g_proxy
 static std::atomic<std::uint64_t> g_proxyGapHist[2][6];
 static std::atomic<std::uint64_t> g_proxyFrames{0}, g_proxyShared{0}, g_proxyRides{0};
 static std::atomic<std::uint32_t> g_chestDistMm{0};
+// the physics timer at each steer: reads with fixed substeps / without / not usable; updates by their substeps
+// (0, 1, 2, 3 or more); the substep and the leftover seen (0.01 ms units) and the most substeps an update may take; what
+// the speed was asked for ([0] this update's substeps, [1] the next update's, predicted, [2] the timer's whole time) and
+// [3] steers left out because the coming update simulates no time; the move after each steer against the time read at
+// that steer and at the next one ([0] that steer's only, [1] the next one's only, [2] both, [3] neither) and the time
+// moved (0.01 ms units); steers checked for the physics update running on another thread (its step lock held), and
+// mid-step (the simulation stage not DONE)
+static std::atomic<std::uint64_t> g_timerReads[3], g_timerSubsteps[4], g_timeFrom[4], g_orderHits[4];
+static std::atomic<std::uint32_t> g_substepMin{0xFFFFFFFFu}, g_substepMax{0}, g_leftMin{0xFFFFFFFFu}, g_leftMax{0},
+    g_movedMin{0xFFFFFFFFu}, g_movedMax{0}, g_timerMaxN{0};
+static std::atomic<std::uint64_t> g_steerChecked{0}, g_steerInUpdate{0}, g_steerMidStep{0};
+static std::atomic<int> g_orderUsed{0};   // 0 = the update after a steer is this frame's, 1 = the next frame's
+static int g_orderTally[2] = {0, 0};      // ... and the checks that told the two apart since the last choice (steering lock)
 static void KeepMaxU(std::atomic<std::uint32_t>& slot, float v) {
     const std::uint32_t u = !(v > 0) ? 0u : v > 4.0e9f ? 4000000000u : static_cast<std::uint32_t>(v);
     std::uint32_t prev = slot.load(std::memory_order_relaxed);
     while (u > prev && !slot.compare_exchange_weak(prev, u, std::memory_order_relaxed)) {
+    }
+}
+static void KeepMinU(std::atomic<std::uint32_t>& slot, float v) {
+    const std::uint32_t u = !(v > 0) ? 0u : v > 4.0e9f ? 4000000000u : static_cast<std::uint32_t>(v);
+    std::uint32_t prev = slot.load(std::memory_order_relaxed);
+    while (u < prev && !slot.compare_exchange_weak(prev, u, std::memory_order_relaxed)) {
     }
 }
 static std::atomic<std::uint64_t> g_boneWaits{0}, g_boneWaitTicks{0};   // waits for the bone lock, and their time
@@ -746,10 +772,37 @@ static void MaybeLog() {
         if (g_cfg.proxies && g_cfg.steer) {
             const std::uint32_t lo = g_proxyStepMin.exchange(0xFFFFFFFFu), hi = g_proxyStepMax.exchange(0);
             Log("   world proxies, steering skipped: no body or world %llu, not on layer 62 yet %llu, no anchor or bones %llu, "
-                "no step time %llu; the physics step time %s %.1f-%.1f ms",
+                "no step time %llu, not keyframed (a ragdoll) %llu; the physics step time %s %.1f-%.1f ms",
                 static_cast<unsigned long long>(g_proxySkips[0].exchange(0)), static_cast<unsigned long long>(g_proxySkips[1].exchange(0)),
                 static_cast<unsigned long long>(g_proxySkips[2].exchange(0)), static_cast<unsigned long long>(g_proxySkips[3].exchange(0)),
-                hi ? "seen" : "not seen", hi ? lo / 10.0 : 0.0, hi / 10.0);
+                static_cast<unsigned long long>(g_proxySkips[4].exchange(0)), hi ? "seen" : "not seen", hi ? lo / 10.0 : 0.0, hi / 10.0);
+            // the physics timer, and which update's time the moves matched
+            auto ull = [](std::atomic<std::uint64_t>& a) { return static_cast<unsigned long long>(a.exchange(0)); };
+            const std::uint32_t sLo = g_substepMin.exchange(0xFFFFFFFFu), sHi = g_substepMax.exchange(0),
+                                lLo = g_leftMin.exchange(0xFFFFFFFFu), lHi = g_leftMax.exchange(0),
+                                mLo = g_movedMin.exchange(0xFFFFFFFFu), mHi = g_movedMax.exchange(0);
+            const unsigned long long nFixed = ull(g_timerReads[0]), nFree = ull(g_timerReads[1]), nBad = ull(g_timerReads[2]);
+            const unsigned long long s0 = ull(g_timerSubsteps[0]), s1 = ull(g_timerSubsteps[1]), s2 = ull(g_timerSubsteps[2]),
+                                     s3 = ull(g_timerSubsteps[3]);
+            const unsigned long long f0 = ull(g_timeFrom[0]), f1 = ull(g_timeFrom[1]), f2 = ull(g_timeFrom[2]), f3 = ull(g_timeFrom[3]);
+            Log("   world proxies, physics timer: fixed substeps in %llu of %llu reads (%.2f-%.2f ms each, up to %u an update; "
+                "leftover %.2f-%.2f ms), %llu not usable; updates with 0 substeps %llu, 1: %llu, 2: %llu, 3 or more: %llu; "
+                "the speed asked for this update's substeps %llu times, the next update's %llu, the timer's whole time %llu; "
+                "not steered, no time simulated next %llu",
+                nFixed, nFixed + nFree + nBad, sHi ? sLo / 100.0 : 0.0, sHi / 100.0, g_timerMaxN.exchange(0),
+                lHi ? lLo / 100.0 : 0.0, lHi / 100.0, nBad, s0, s1, s2, s3, f0, f1, f2, f3);
+            const unsigned long long o0 = ull(g_orderHits[0]), o1 = ull(g_orderHits[1]), o2 = ull(g_orderHits[2]),
+                                     o3 = ull(g_orderHits[3]);
+            Log("   world proxies, the move after each steer: as long as that steer's timer said %llu, as the next steer's %llu, "
+                "both %llu, neither %llu (moved for %.2f-%.2f ms); the speed is asked for %s; steered while the physics "
+                "update ran on another thread %llu of %llu (mid-step %llu)",
+                o0, o1, o2, o3, mHi ? mLo / 100.0 : 0.0, mHi / 100.0,
+                g_cfg.steerTime == 0   ? "the timer's whole time"
+                : g_cfg.steerTime == 2 ? "this update's substeps"
+                : g_cfg.steerTime == 3 ? "the next update's substeps"
+                : g_orderUsed.load()   ? "the next update's substeps (as measured)"
+                                       : "this update's substeps (as measured so far)",
+                ull(g_steerInUpdate), ull(g_steerChecked), ull(g_steerMidStep));
             char hist[2][140];
             for (int w = 0; w < 2; ++w) {
                 unsigned long long h[6];
@@ -2765,6 +2818,66 @@ static void ReadProxyMotion(const ProxyRead& p, ProxyMotion& m) {
     m.propsCount = n;
     m.entry = SafeCopy(m.e, entries + static_cast<size_t>(props) * 0x70 + 0x08, sizeof(m.e));
 }
+
+// the physics timer of a bhkWorld, read from 1.16.244.  ID 125014 writes it once a frame for each world, before
+// the frame's jobs run (ID 99406 calls it through 99403 and 124990, then has 99392 build the job graph that runs both the
+// physics update, job 97742, and the actors' updates): +0x7CA fixed substeps (a byte), +0x7CC the frame's time, +0x7D4
+// the substep, +0x7DC the leftover after this update, +0x7E4 the leftover before it + the frame's time (what the game's
+// keyframe calls are given), +0x7E8 this update's substeps (the whole ones that fit, at most +0x800).  With fixed
+// substeps an update simulates its substeps only, and the rest waits in the leftover (with 1/60 s substeps: at 85 fps
+// about one update in three simulates nothing, and at 50 fps an update simulates 0.56 to 1.0 of +0x7E4)
+struct PhysTimer {
+    bool ok = false, fixed = false;
+    float frame = 0, substep = 0, leftover = 0, total = 0;
+    std::uint32_t n = 0, maxN = 0;
+    float This() const { return fixed ? static_cast<float>(n) * substep : total; }   // this update's simulated time
+    float Next() const {   // the next update's, if the next frame takes as long as this one
+        if (!fixed) return total;
+        std::uint32_t k = static_cast<std::uint32_t>((leftover + frame) / substep);
+        if (k > maxN) k = maxN;
+        return static_cast<float>(k) * substep;
+    }
+};
+static bool ReadPhysTimer(void* bhk, PhysTimer& t) {
+    t = PhysTimer{};
+    alignas(4) unsigned char raw[0x40];
+    if (!bhk || !SafeCopy(raw, static_cast<char*>(bhk) + 0x7C8, sizeof(raw))) return false;
+    auto f32 = [&](int at) {
+        float v;
+        memcpy(&v, raw + (at - 0x7C8), 4);
+        return v;
+    };
+    auto u32 = [&](int at) {
+        std::uint32_t v;
+        memcpy(&v, raw + (at - 0x7C8), 4);
+        return v;
+    };
+    t.fixed = raw[0x7CA - 0x7C8] != 0;
+    t.frame = f32(0x7CC);
+    t.substep = f32(0x7D4);
+    t.leftover = f32(0x7DC);
+    t.total = f32(0x7E4);
+    t.n = u32(0x7E8);
+    t.maxN = u32(0x800);
+    if (!(t.total > 0.0f && t.total < 0.25f) || !(t.frame >= 0.0f && t.frame < 0.25f)) return false;
+    if (t.fixed) {
+        // a timer this function can't explain is not used: the substeps plus the leftover make the whole time
+        if (!(t.substep >= 0.001f && t.substep <= 0.1f) || t.maxN < 1 || t.maxN > 64 || t.n > t.maxN ||
+            !(t.leftover > -0.0005f && t.leftover < t.total + 0.0005f) ||
+            std::fabs(static_cast<float>(t.n) * t.substep + t.leftover - t.total) > 0.0005f)
+            return false;
+    }
+    t.ok = true;
+    return true;
+}
+// the order learned, logged when it changes (a test run's worth of lines)
+static void NoteOrder(int order, int thisHits, int nextHits) {
+    static std::atomic<int> lines{0};
+    if (lines.fetch_add(1) >= 20) return;
+    Log("world proxies (you): after each steer the body moved as long as %s timer said (%d of %d checks that tell them "
+        "apart); the speed is now asked for %s", order ? "the next steer's" : "that steer's", order ? nextHits : thisHits,
+        thisHits + nextHits, order ? "the next update's substeps" : "this update's substeps");
+}
 // which Havok motion each of the player's proxies and its C_Chest ragdoll body is on, logged when that
 // changes, with how far each motion's centre of mass is from its body
 static void NoteProxyMotions(const ProxyRead* p, const ProxyMotion* mo) {
@@ -2889,6 +3002,12 @@ static void WatchProxies(const ActorView& v, int site) {
         static std::mutex sm;
         static Vec3 lastTarget[2];
         static bool haveLast[2] = {false, false};
+        // the check after each steer: the velocity asked (none after a warp), where Havok had the body then,
+        // that steer's simulated time
+        static Vec3 lastVel[2], lastAt[2];
+        static float lastThis[2] = {0, 0};
+        static bool haveCheck[2] = {false, false};
+        int* const tally = g_orderTally;
         std::lock_guard<std::mutex> lock(sm);
         // the motions first.  When the two proxies are on one Havok motion, each steer moves both, so the
         // second would undo the first: with [World] bSteerOnce that motion is steered once, through the left proxy, and
@@ -2897,14 +3016,19 @@ static void WatchProxies(const ActorView& v, int site) {
         for (int i = 0; i < kNumWorld; ++i) ReadProxyMotion(p[i], mo[i]);
         NoteProxyMotions(p, mo);
         const bool shared = mo[0].motion && mo[1].motion && mo[0].index == mo[1].index && p[0].world == p[1].world;
+        // in game the proxies' motion is the C_Chest ragdoll body's too; when the game makes that body dynamic
+        // (a ragdoll: death, a knockdown), the motion is the ragdoll's and nothing on it is steered
+        const bool chestOn = mo[2].motion && mo[0].motion && mo[2].index == mo[0].index && p[2].world == p[0].world;
         g_proxyFrames.fetch_add(1, std::memory_order_relaxed);
         if (shared) g_proxyShared.fetch_add(1, std::memory_order_relaxed);
         for (int s = 0; s < 2; ++s) {
             const Anchor& a = v.anchors[s];
-            const int skip = (!p[s].body || !p[s].bhk) ? 0 : (p[s].filter & 0x7F) != kProxyLayer ? 1 : !a.node ? 2 : -1;
+            int skip = (!p[s].body || !p[s].bhk) ? 0 : (p[s].filter & 0x7F) != kProxyLayer ? 1 : !a.node ? 2 : -1;
+            if (skip < 0 && (!(p[s].flags & 4) || (chestOn && p[2].body && !(p[2].flags & 4)))) skip = 4;
             if (skip >= 0) {
                 g_proxySkips[skip].fetch_add(1, std::memory_order_relaxed);
                 haveLast[s] = false;
+                haveCheck[s] = false;
                 continue;
             }
             if (haveLast[s]) KeepMax(g_proxyLagMm[s], Sub(p[s].pos, lastTarget[s]), 1000.0f);
@@ -2921,11 +3045,13 @@ static void WatchProxies(const ActorView& v, int site) {
             if (nb != 4 || !WorldOf(a.node, ax)) {
                 g_proxySkips[2].fetch_add(1, std::memory_order_relaxed);
                 haveLast[s] = false;
+                haveCheck[s] = false;
                 continue;
             }
             if (!SafeCopy(&stepS, static_cast<char*>(p[s].bhk) + 0x7E4, 4) || !(stepS > 0.0001f && stepS < 0.25f)) {
                 g_proxySkips[3].fetch_add(1, std::memory_order_relaxed);
                 haveLast[s] = false;
+                haveCheck[s] = false;
                 continue;
             }
             const std::uint32_t tenths = static_cast<std::uint32_t>(stepS * 10000.0f);
@@ -2947,7 +3073,7 @@ static void WatchProxies(const ActorView& v, int site) {
             NoteProxyLimits(s, ms);
             const Vec3 at = ms.motion ? Add(p[s].pos, ms.lo) : p[s].pos;
             const Vec3 gap = Sub(target, at);
-            const float dist = std::sqrt(Dot(gap, gap)), need = dist / stepS, cm = dist * 100.0f;
+            const float dist = std::sqrt(Dot(gap, gap)), cm = dist * 100.0f;
             g_proxyGapHist[s][cm < 2 ? 0 : cm < 5 ? 1 : cm < 10 ? 2 : cm < 25 ? 3 : cm < 50 ? 4 : 5].fetch_add(
                 1, std::memory_order_relaxed);
             if (s == 1 && shared && g_cfg.steerOnce) {   // rides on the motion the left proxy steered
@@ -2955,18 +3081,89 @@ static void WatchProxies(const ActorView& v, int site) {
                 KeepMax(g_proxyStepMm[s], gap, 1000.0f);
                 lastTarget[s] = target;
                 haveLast[s] = true;
+                haveCheck[s] = false;
                 continue;
             }
+            // the physics timer.  With fixed substeps the update after the steer simulates whole substeps
+            // only, so a speed of gap / +0x7E4 (what the game's own keyframe calls use) covers 0 to 100 % of the gap
+            PhysTimer tm;
+            const bool timer = ReadPhysTimer(p[s].bhk, tm);
+            g_timerReads[!timer ? 2 : tm.fixed ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
+            if (timer && tm.fixed) {
+                g_timerSubsteps[tm.n < 3 ? tm.n : 3].fetch_add(1, std::memory_order_relaxed);
+                KeepMinU(g_substepMin, tm.substep * 1.0e5f);
+                KeepMaxU(g_substepMax, tm.substep * 1.0e5f);
+                KeepMinU(g_leftMin, tm.leftover * 1.0e5f);
+                KeepMaxU(g_leftMax, tm.leftover * 1.0e5f);
+                KeepMaxU(g_timerMaxN, static_cast<float>(tm.maxN));
+            }
+            // the check of the last steer: how long the body moved with the velocity asked then (its move
+            // along that velocity / its speed), against the time the timer gave at that steer (the update after it ran
+            // in the same frame) and the time it gives now (the update ran at the start of the next frame)
+            if (haveCheck[s] && timer && tm.fixed) {
+                const float v2 = Dot(lastVel[s], lastVel[s]);
+                if (v2 > 0.09f) {   // over 0.3 m/s, so a move this small is still measured well
+                    const float moved = Dot(Sub(at, lastAt[s]), lastVel[s]) / v2, then = lastThis[s], now = tm.This();
+                    const float tolThen = 0.1f * then > 0.0015f ? 0.1f * then : 0.0015f,
+                                tolNow = 0.1f * now > 0.0015f ? 0.1f * now : 0.0015f;
+                    const bool mThen = std::fabs(moved - then) <= tolThen, mNow = std::fabs(moved - now) <= tolNow;
+                    g_orderHits[mThen && mNow ? 2 : mThen ? 0 : mNow ? 1 : 3].fetch_add(1, std::memory_order_relaxed);
+                    KeepMinU(g_movedMin, moved * 1.0e5f);
+                    KeepMaxU(g_movedMax, moved * 1.0e5f);
+                    if (mThen != mNow) ++tally[mThen ? 0 : 1];
+                    if (tally[0] + tally[1] >= 24) {   // a choice from 24 checks that tell the two apart, by 2 to 1
+                        const int nChecks = tally[0] + tally[1], used = g_orderUsed.load();
+                        const int want = 3 * tally[1] >= 2 * nChecks ? 1 : 3 * tally[0] >= 2 * nChecks ? 0 : used;
+                        if (want != used && g_cfg.steerTime == 1) {
+                            g_orderUsed.store(want);
+                            NoteOrder(want, tally[0], tally[1]);
+                        }
+                        tally[0] = tally[1] = 0;
+                    }
+                }
+            }
+            haveCheck[s] = false;
+            // the time the speed is asked for: this update's substeps when the update after a steer runs in
+            // the same frame, the next update's (as if the next frame takes as long as this one, at least one substep)
+            // when it runs at the start of the next frame
+            float h = stepS;
+            int from = 2;
+            if (timer && tm.fixed && g_cfg.steerTime != 0) {
+                const int order = g_cfg.steerTime == 2 ? 0 : g_cfg.steerTime == 3 ? 1 : g_orderUsed.load();
+                if (order == 0) {
+                    h = tm.This();
+                    from = 0;
+                } else {
+                    h = tm.Next();
+                    if (h < tm.substep) h = tm.substep;
+                    from = 1;
+                }
+            }
+            if (!(h > 0.0001f)) {   // the update after this steer simulates no time: nothing would move in it
+                g_timeFrom[3].fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            g_timeFrom[from].fetch_add(1, std::memory_order_relaxed);
+            const float need = dist / h;
             float cap = g_cfg.proxyMaxSpeed;
             if (ms.motion && ms.limit > 0.1f && ms.limit < cap) cap = ms.limit;
             g_proxyCapMmS.store(static_cast<std::uint32_t>(cap * 1000.0f), std::memory_order_relaxed);
+            // is the physics update running on another thread right now (its step lock, hknpBSWorld+0xB08:
+            // the owning thread's ID, 0 when free; the simulation stage at +0x9C0, DONE = 1)?  Counted only
+            std::uint32_t owner = 0, stage = 1;
+            if (SafeCopy(&owner, static_cast<char*>(p[s].world) + 0xB08, 4) &&
+                SafeCopy(&stage, static_cast<char*>(p[s].world) + 0x9C0, 4)) {
+                g_steerChecked.fetch_add(1, std::memory_order_relaxed);
+                if (owner && owner != GetCurrentThreadId()) g_steerInUpdate.fetch_add(1, std::memory_order_relaxed);
+                if (stage != 1) g_steerMidStep.fetch_add(1, std::memory_order_relaxed);
+            }
             bool warped = false;
             if (need > cap) {
                 reinterpret_cast<KeyframeFn>(g_waddr[kKeyframeFn])(p[s].co, m, kWarpStep, &warped);
                 g_proxyOwnWarps.fetch_add(1, std::memory_order_relaxed);
                 if (!warped) g_proxyOwnMissed.fetch_add(1, std::memory_order_relaxed);
             } else {
-                reinterpret_cast<KeyframeFn>(g_waddr[kKeyframeFn])(p[s].co, m, stepS, &warped);
+                reinterpret_cast<KeyframeFn>(g_waddr[kKeyframeFn])(p[s].co, m, h, &warped);
                 if (warped) {
                     g_proxyWarps.fetch_add(1, std::memory_order_relaxed);
                 } else {
@@ -2982,6 +3179,12 @@ static void WatchProxies(const ActorView& v, int site) {
             KeepMax(g_proxyStepMm[s], gap, 1000.0f);
             lastTarget[s] = target;
             haveLast[s] = true;
+            if (!warped && timer && tm.fixed) {   // what the next steer checks
+                lastVel[s] = Scale(gap, 1.0f / h);
+                lastAt[s] = at;
+                lastThis[s] = tm.This();
+                haveCheck[s] = true;
+            }
         }
     }
     for (int s = 0; s < 2; ++s) {
@@ -3464,6 +3667,16 @@ static void ResolveWorldAddresses(const char* path, std::uint32_t runtime, std::
                               "read, and a proxy needing more than %.1f m/s (or its own limit) is warped"
                             : "world proxies: the motion tables NOT confirmed; the speed limits aren't read, a proxy needing "
                               "more than %.1f m/s is warped", g_cfg.proxyMaxSpeed);
+    if (g_cfg.steer) {
+        static const char* const kTime[4] = {
+            "the timer's whole time (leftover + frame, as the game's own keyframe calls)",
+            "the substeps the update after each steer simulates (this frame's update until the checks show it's the next "
+            "frame's)",
+            "this update's substeps", "the next update's substeps (predicted from the leftover and this frame's time)"};
+        Log("world proxies: the physics timer (bhkWorld+0x7CA..+0x803) is read at each steer; the speed is asked for %s "
+            "([World] iSteerTime %d); a motion the game has made dynamic (a ragdoll) is never steered",
+            kTime[g_cfg.steerTime], g_cfg.steerTime);
+    }
     if (g_cfg.proxyLayer || g_cfg.steer) {
         if (g_proxyWriteOk)
             Log("world proxies: the filter setter (vtable slot 63) and keyframe-with-warp checked; layer 62%s for every "

@@ -1052,7 +1052,8 @@ static int RunDeadBodies() {
 // game lays it out (ReadProxy's comment); its failure cases; no Windows memory checks; then WatchProxies on a fake
 // A-Body body whose skeleton carries the two proxy nodes (rest pose + ABody_Proxy_Breast_L/R under the Pecs).
 struct FakeWorld {
-    alignas(16) char co[0x40], sys[0x40], inst[0x60], world[0xB00], bhk[0x800], bodies[8 * 0xB0];   // bhk: +0x7E4 the step
+    // bhk: +0x7E4 the step (and the whole timer, +0x7C8..+0x803); world: +0xB08 its step lock, +0x9C0 Havok's stage
+    alignas(16) char co[0x40], sys[0x40], inst[0x60], world[0xC00], bhk[0x810], bodies[8 * 0xB0];
     alignas(16) char motions[8 * 0x80], table[0x60], entries[4 * 0x70];   // motions, motion-properties table
     alignas(16) char co2[0x40], sys2[0x40], inst2[0x60];   // a second proxy's chain into the same world
     std::uint32_t ids[2], ids2[2];
@@ -1110,6 +1111,8 @@ static void MakeFakeWorld(FakeWorld& w, int body, std::uint32_t filter, Vec3 pos
     memcpy(w.entries + 1 * 0x70 + 0x08, e, sizeof(e));
     const double com[3] = {pos.x, pos.y, pos.z};   // the motion's centre of mass, on the body
     memcpy(mo + 0x10, com, sizeof(com));
+    const std::uint32_t done = 1;   // Havok's simulation stage DONE (no step running)
+    memcpy(w.world + 0x9C0, &done, 4);
 }
 // a second proxy in the same fake world (its own collision object, system and instance), body `body` on
 // motion `motion`: the motion of the first proxy makes the two share one, as the game seems to do
@@ -1206,6 +1209,80 @@ static bool FakeKeyframeStep(void* co, const float* m, float stepS, bool* warped
         memcpy(g_simBody[1 - s] + 0x30, o, 12);
     }
     return true;
+}
+// the game's physics timer (ID 125014) on a fake bhkWorld: the frame's time added to the leftover, the
+// whole substeps that fit (at most maxN) simulated, the rest left over
+static void FakeTimerTick(char* bhk, float frame, float sub, std::uint32_t maxN) {
+    float left;
+    memcpy(&left, bhk + 0x7DC, 4);
+    const float total = left + frame;
+    std::uint32_t n = static_cast<std::uint32_t>(total / sub);
+    if (n > maxN) n = maxN;
+    left = total - static_cast<float>(n) * sub;
+    const std::uint8_t fixed = 1;
+    memcpy(bhk + 0x7CA, &fixed, 1);
+    memcpy(bhk + 0x7CC, &frame, 4);
+    memcpy(bhk + 0x7D4, &sub, 4);
+    memcpy(bhk + 0x7DC, &left, 4);
+    memcpy(bhk + 0x7E4, &total, 4);
+    memcpy(bhk + 0x7E8, &n, 4);
+    memcpy(bhk + 0x800, &maxN, 4);
+}
+static float FakeTimerSimulates(const char* bhk) {   // what the update this timer describes simulates
+    float sub;
+    std::uint32_t n;
+    memcpy(&sub, bhk + 0x7D4, 4);
+    memcpy(&n, bhk + 0x7E8, 4);
+    return static_cast<float>(n) * sub;
+}
+// the keyframe function as the game runs it, without a step: it only asks (sets the velocity, gap / the time
+// it is given, held to the motion's own limit) or warps (places the body now, velocity 0); the physics update then
+// moves the motion's bodies for the time it simulates
+static float g_fakeKeyStep = 0;
+static bool FakeKeyframeAsk(void* co, const float* m, float stepS, bool* warped) {
+    ++g_fakeKeyCalls;
+    g_fakeKeyStep = stepS;
+    *warped = false;
+    const int s = co == g_simCo[0] ? 0 : co == g_simCo[1] ? 1 : -1;
+    if (s < 0 || !(stepS > 0)) return false;
+    float pos[3], lo[3], lim, start[3];
+    memcpy(pos, g_simBody[s] + 0x30, 12);
+    memcpy(lo, g_simBody[s] + 0x40, 12);
+    memcpy(&lim, g_simMotion[s] + 0x6C, 4);
+    memcpy(start, pos, 12);
+    float d[3], len2 = 0;
+    for (int j = 0; j < 3; ++j) {
+        d[j] = m[12 + j] - (pos[j] + lo[j]);
+        len2 += d[j] * d[j];
+    }
+    const float len = std::sqrt(len2), asked = len / stepS;
+    float v[4] = {0, 0, 0, lim};
+    if (asked > 100.0f) {
+        for (int j = 0; j < 3; ++j) pos[j] = m[12 + j] - lo[j];
+        memcpy(g_simBody[s] + 0x30, pos, 12);
+        if (g_simShared) {
+            float o[3];
+            memcpy(o, g_simBody[1 - s] + 0x30, 12);
+            for (int j = 0; j < 3; ++j) o[j] += pos[j] - start[j];
+            memcpy(g_simBody[1 - s] + 0x30, o, 12);
+        }
+        *warped = true;
+    } else if (len > 0) {
+        const float speed = asked > lim ? lim : asked;
+        for (int j = 0; j < 3; ++j) v[j] = d[j] / len * speed;
+    }
+    memcpy(g_simMotion[s] + 0x60, v, 16);
+    return true;
+}
+static void FakePhysicsUpdate(float t) {   // the bodies on the first proxy's motion move for t seconds
+    float v[4];
+    memcpy(v, g_simMotion[0] + 0x60, 16);
+    for (int b = 0; b < (g_simShared ? 2 : 1); ++b) {
+        float pos[3];
+        memcpy(pos, g_simBody[b] + 0x30, 12);
+        for (int j = 0; j < 3; ++j) pos[j] += v[j] * t;
+        memcpy(g_simBody[b] + 0x30, pos, 12);
+    }
 }
 static int RunWorldProxies() {
     int fails = 0;
@@ -1662,6 +1739,169 @@ static int RunWorldProxies() {
             g_cfg.proxyInert = savedInert;
             g_proxyMotionOk = savedM;
             g_cfg.steerOnce = savedOnce;
+        }
+        {   // steering for the time the physics simulates.  The fake world runs the game's fixed-substep
+            // timer (1/60 s substeps, at most 4 an update) and a physics update that moves the shared motion for its
+            // substeps only, either after the steer in the same frame (order A) or at the start of the next frame
+            // (order B).  The old way (gap / leftover + frame) falls behind, as it did in game; the new one reaches
+            // every target it asks for, learns the order from the moves, and steers no ragdoll
+            const std::uintptr_t savedSet = g_waddr[kSetFilterFn], savedKey = g_waddr[kKeyframeFn];
+            const bool savedWrite = g_proxyWriteOk, savedLayer = g_cfg.proxyLayer, savedSteer = g_cfg.steer,
+                       savedInert = g_cfg.proxyInert, savedM = g_proxyMotionOk, savedOnce = g_cfg.steerOnce;
+            const int savedTime = g_cfg.steerTime;
+            const float savedCap = g_cfg.proxyMaxSpeed;
+            g_waddr[kSetFilterFn] = reinterpret_cast<std::uintptr_t>(&FakeSetFilter);
+            g_waddr[kKeyframeFn] = reinterpret_cast<std::uintptr_t>(&FakeKeyframeAsk);
+            g_proxyWriteOk = g_cfg.proxyLayer = g_cfg.steer = g_cfg.proxyInert = g_proxyMotionOk = g_cfg.steerOnce = true;
+            g_cfg.proxyMaxSpeed = 20.0f;
+            char* moving[4] = {fp.node["L_Pecs"], fp.node["R_Pecs"], fp.node["ABody_Proxy_Breast_L"], fp.node["ABody_Proxy_Breast_R"]};
+            float startX[4];
+            for (int i = 0; i < 4; ++i) memcpy(&startX[i], moving[i] + 0xB0, 4);
+            static FakeWorld sw;
+            auto targetOf = [&](int side) {
+                static const char* const kBone[4] = {"Upper", "Lower", "Inner", "Outer"};
+                float mean[3] = {0, 0, 0};
+                for (const char* bone : kBone) {
+                    const float* t = reinterpret_cast<const float*>(fp.node[std::string("TF_Breast_") + bone + (side ? "_R" : "_L")] + 0x70);
+                    for (int j = 0; j < 3; ++j) mean[j] += t[j] / 4;
+                }
+                Xf px;
+                WorldOf(fp.node[side ? "R_Pecs" : "L_Pecs"], px);
+                return Apply(px, mean);
+            };
+            struct Timed { std::uint32_t gapMm, lagMm; std::uint64_t steers, warps, keys, from[4], hits[4], ragdoll; int order; };
+            const float sub = 1.0f / 60.0f;
+            // 10 frames standing, `learn` frames at `speed` (not measured), then `frames` measured
+            auto run = [&](int mode, bool orderB, float fps, float speed, int learn, int frames, bool ragdoll) {
+                g_cfg.steerTime = mode;
+                g_orderUsed = 0;
+                g_orderTally[0] = g_orderTally[1] = 0;
+                for (int i = 0; i < 4; ++i) memcpy(moving[i] + 0xB0, &startX[i], 4);
+                MakeFakeWorld(sw, 1, 0x0004403E, targetOf(0));
+                AddFakeProxy(sw, 2, 0x0004403E, targetOf(1), 1);   // the right proxy on the left one's motion
+                if (ragdoll) {
+                    const std::uint32_t dynamic = 0x0A;   // IS_DYNAMIC | IS_ACTIVE: the game's ragdoll
+                    memcpy(sw.bodies + 1 * 0xB0 + 0x54, &dynamic, 4);
+                }
+                g_simCo[0] = sw.co;
+                g_simCo[1] = sw.co2;
+                g_simBody[0] = sw.bodies + 1 * 0xB0;
+                g_simBody[1] = sw.bodies + 2 * 0xB0;
+                g_simMotion[0] = g_simMotion[1] = sw.motions + 1 * 0x80;
+                g_simShared = true;
+                void* c = sw.co;
+                memcpy(moving[2] + 0x110, &c, 8);
+                c = sw.co2;
+                memcpy(moving[3] + 0x110, &c, 8);
+                const float frame = 1.0f / fps;
+                Timed r{};
+                int keys0 = g_fakeKeyCalls;
+                for (int f = 0; f < 10 + learn + frames; ++f) {
+                    if (f == 10 + learn) {   // the measured part starts
+                        for (int s = 0; s < 2; ++s) g_proxyStepMm[s] = g_proxyLagMm[s] = 0;
+                        g_proxySteers = g_proxyOwnWarps = g_proxyWarps = 0;
+                        for (auto& x : g_timeFrom) x = 0;
+                        for (auto& x : g_orderHits) x = 0;
+                        g_proxySkips[4] = 0;
+                        keys0 = g_fakeKeyCalls;
+                    }
+                    FakeTimerTick(sw.bhk, frame, sub, 4);
+                    const float simulated = FakeTimerSimulates(sw.bhk);
+                    if (orderB) FakePhysicsUpdate(simulated);
+                    if (f >= 10)
+                        for (int i = 0; i < 4; ++i) {
+                            float x;
+                            memcpy(&x, moving[i] + 0xB0, 4);
+                            x += speed * frame;
+                            memcpy(moving[i] + 0xB0, &x, 4);
+                        }
+                    WatchProxies(v, 2);
+                    if (!orderB) FakePhysicsUpdate(simulated);
+                }
+                r.gapMm = g_proxyStepMm[0].load();
+                r.lagMm = g_proxyLagMm[0].load();
+                r.steers = g_proxySteers.load();
+                r.warps = g_proxyOwnWarps.load() + g_proxyWarps.load();
+                r.keys = static_cast<std::uint64_t>(g_fakeKeyCalls - keys0);
+                for (int k = 0; k < 4; ++k) {
+                    r.from[k] = g_timeFrom[k].load();
+                    r.hits[k] = g_orderHits[k].load();
+                }
+                r.ragdoll = g_proxySkips[4].load();
+                r.order = g_orderUsed.load();
+                g_simShared = false;
+                return r;
+            };
+            // 6 m/s: 7.1 cm a frame at 85 fps, 12 cm at 50.  The old way at 85 fps (an update in three simulates
+            // nothing, the rest 60-95 % of what the steer asked for) and at 50 fps (56-100 %)
+            const Timed old85 = run(0, false, 85.0f, 6.0f, 60, 240, false), old50 = run(0, false, 50.0f, 6.0f, 60, 240, false);
+            // the new way, order A: each target reached (lag ~0); at 85 fps the frame before an update with no
+            // substeps isn't steered, so the gap after it is two frames (14 cm)
+            const Timed a85 = run(1, false, 85.0f, 6.0f, 60, 240, false), a50 = run(1, false, 50.0f, 6.0f, 60, 240, false);
+            // order B: learned within the first 200 frames (at a steady 50 fps only an update of two substeps after one
+            // of one tells the two apart, one in five: 24 checks take 120 frames), then the next update's substeps predicted
+            // exactly; at 85 fps an update with no substeps leaves the body where it was for a frame
+            const Timed b50 = run(1, true, 50.0f, 6.0f, 200, 240, false), b85 = run(1, true, 85.0f, 6.0f, 200, 240, false);
+            const Timed forced = run(3, true, 50.0f, 6.0f, 0, 120, false);   // iSteerTime 3: the next update's, from the start
+            const Timed rag = run(1, false, 50.0f, 6.0f, 0, 30, true);   // the motion dynamic: a ragdoll
+            // the steer while the physics update runs on another thread, and mid-step, counted
+            const std::uint64_t chk0 = g_steerChecked.load(), in0 = g_steerInUpdate.load(), mid0 = g_steerMidStep.load();
+            {
+                g_cfg.steerTime = 1;
+                MakeFakeWorld(sw, 1, 0x0004403E, targetOf(0));
+                AddFakeProxy(sw, 2, 0x0004403E, targetOf(1), 1);
+                g_simCo[0] = sw.co;
+                g_simCo[1] = sw.co2;
+                g_simBody[0] = sw.bodies + 1 * 0xB0;
+                g_simBody[1] = sw.bodies + 2 * 0xB0;
+                g_simMotion[0] = g_simMotion[1] = sw.motions + 1 * 0x80;
+                const std::uint32_t other = GetCurrentThreadId() + 1, collide = 4;
+                memcpy(sw.world + 0xB08, &other, 4);
+                memcpy(sw.world + 0x9C0, &collide, 4);
+                FakeTimerTick(sw.bhk, 1.0f / 50.0f, sub, 4);
+                WatchProxies(v, 2);
+            }
+            const std::uint64_t chk = g_steerChecked.load() - chk0, inUpd = g_steerInUpdate.load() - in0,
+                                mid = g_steerMidStep.load() - mid0;
+            const bool okOld = old85.lagMm >= 50 && old50.lagMm >= 50 && old85.from[2] == old85.steers && old50.from[2] == old50.steers;
+            const bool okA = a85.lagMm <= 2 && a50.lagMm <= 2 && a85.gapMm <= 143 && a50.gapMm <= 122 && a85.order == 0 &&
+                             a50.order == 0 && a85.warps == 0 && a50.warps == 0 && a85.from[3] >= 70 && a85.from[0] == a85.steers &&
+                             a50.from[3] == 0 && a50.hits[0] + a50.hits[2] >= 230 && a50.hits[1] == 0;
+            const bool okB = b50.order == 1 && b85.order == 1 && b50.lagMm <= 2 && b50.gapMm <= 122 && b50.from[1] == b50.steers &&
+                             b50.hits[1] + b50.hits[2] >= 230 && b50.hits[0] == 0 && b85.lagMm <= 72 && b85.gapMm <= 215 &&
+                             b85.warps == 0 && forced.from[1] == forced.steers && forced.lagMm <= 2;
+            const bool okRag = rag.keys == 0 && rag.ragdoll == 30;
+            const bool okRace = chk == 1 && inUpd == 1 && mid == 1;
+            char d8f[900];
+            snprintf(d8f, sizeof(d8f), "6 m/s, the old time: 85 fps %u mm off the target asked (gap %u mm), 50 fps %u mm (gap %u); "
+                     "the substeps, order A: 85 fps lag %u mm gap %u mm (%llu frames left out), 50 fps lag %u gap %u (moves "
+                     "matched that steer's time %llu+%llu); order B learned %d/%d: 50 fps lag %u gap %u, 85 fps lag %u gap %u; "
+                     "iSteerTime 3 lag %u; ragdoll: %llu keyframe calls, %llu left out; another thread's update %llu/%llu, "
+                     "mid-step %llu",
+                     old85.lagMm, old85.gapMm, old50.lagMm, old50.gapMm, a85.lagMm, a85.gapMm,
+                     static_cast<unsigned long long>(a85.from[3]), a50.lagMm, a50.gapMm, static_cast<unsigned long long>(a50.hits[0]),
+                     static_cast<unsigned long long>(a50.hits[2]), b50.order, b85.order, b50.lagMm, b50.gapMm, b85.lagMm, b85.gapMm,
+                     forced.lagMm, static_cast<unsigned long long>(rag.keys), static_cast<unsigned long long>(rag.ragdoll),
+                     static_cast<unsigned long long>(inUpd), static_cast<unsigned long long>(chk), static_cast<unsigned long long>(mid));
+            printf("%-14s %-40s %s  %s\n", "world proxies", "(steering for the simulated time)", d8f,
+                   okOld && okA && okB && okRag && okRace ? "OK" : "FAIL");
+            fails += okOld && okA && okB && okRag && okRace ? 0 : 1;
+            for (int i = 0; i < 4; ++i) memcpy(moving[i] + 0xB0, &startX[i], 4);
+            void* c = wl.co;
+            memcpy(moving[2] + 0x110, &c, 8);
+            c = wr.co;
+            memcpy(moving[3] + 0x110, &c, 8);
+            g_waddr[kSetFilterFn] = savedSet;
+            g_waddr[kKeyframeFn] = savedKey;
+            g_proxyWriteOk = savedWrite;
+            g_cfg.proxyLayer = savedLayer;
+            g_cfg.steer = savedSteer;
+            g_cfg.proxyInert = savedInert;
+            g_proxyMotionOk = savedM;
+            g_cfg.steerOnce = savedOnce;
+            g_cfg.steerTime = savedTime;
+            g_cfg.proxyMaxSpeed = savedCap;
+            g_orderUsed = 0;
         }
         ResetOthers();
     }

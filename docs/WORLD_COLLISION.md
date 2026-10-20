@@ -15,6 +15,8 @@ The game facts it rests on, with the hard risks, are in [research/HAVOK_WORLD.md
      own one-body physics system.
    - The system is cloned from a game NIF's one-body system and patched: keyframed, a 7.5 cm near-sphere, layer 62.
      Its motion properties don't matter: the game gives the bodies its own (100 m/s, 200 rad/s).
+   - The game attaches both proxies to the `C_Chest` ragdoll body's motion: the three move as one rigid piece, and
+     the motion is the ragdoll's when the game makes it dynamic.
 2. **The game owns their lifetime.**
    - They enter and leave the physics world with the character's 3D, so cell changes, fast travel, ships, saves and
      death stay the game's job.
@@ -29,20 +31,29 @@ The game facts it rests on, with the hard risks, are in [research/HAVOK_WORLD.md
 - **The layer.** The game puts skeleton bodies on its ragdoll layer (8) when it adds them. So every A-Body body's
   proxies are set back to layer 62 plus "collide with nothing", through the collision object's filter setter (vtable
   slot 63, ID 125374). The setting is sent again if the game takes it back, at most every 0.5 s per body.
-- **Steering.** Your character's two proxies are steered to the breast centres every frame. The keyframe function gets
-  the step time in seconds, `[bhkWorld+0x7E4]`, as the game's own node update passes it.
+- **Steering.** Your character's two proxies are steered to the breast centres every frame. The game's physics
+  simulates whole fixed substeps and keeps the rest of the frame's time for later, so the keyframe function gets the
+  time the update after the steer really simulates: its substeps (`n x substep` from the physics timer,
+  `bhkWorld+0x7CA..+0x803`), not the timer's whole time (`[bhkWorld+0x7E4]`, leftover + frame), of which a body
+  covers only part. Whether that update is this frame's or the next one's is measured from how the body moves after
+  each steer, and switched to (`[World] iSteerTime`). A frame whose update simulates no time isn't steered, and
+  neither is one whose timer holds no usable step (the game paused).
 - **Warps.** Havok holds a body to its motion's own speed limit, while the keyframe function only warps above the
   motion-properties table's limit. So TF Physics reads both. When the speed a step needs is over
   `[World] fProxyMaxSpeed` or the body's own limit, it warps the proxy itself: the keyframe call with a 1 ns step,
   which takes the game's warp path (placed, velocity 0).
-- **One steer per shared motion.** The game appears to put both proxies on one Havok motion. Steering each of them
-  would make the second steer undo the first, so a shared motion is steered once a frame, through the left proxy, and
-  the right one rides on it (`[World] bSteerOnce`).
+- **One steer per shared motion.** Both proxies are on one Havok motion. Steering each of them would make the second
+  steer undo the first, so a shared motion is steered once a frame, through the left proxy, and the right one rides on
+  it (`[World] bSteerOnce`).
+- **No ragdolls.** A proxy is steered only while its body, and the `C_Chest` ragdoll body on the same motion, are
+  keyframed. When the game makes the motion dynamic (a ragdoll), nothing on it is steered.
 - **The log** counts layer sets, steers, warps and skipped steers. It logs both speed limits and each proxy's motion
   (with the motion's centre of mass) whenever they change, how far behind each proxy is before each steer (six bands),
-  and how far the C_Chest ragdoll body is from its bone.
-- **Where it stands.** Steering keeps the proxies within a few tens of centimetres of the breasts while moving.
-  Steering once per shared motion is in testing.
+  and how far the C_Chest ragdoll body is from its bone. It also logs the physics timer (the substep, the substeps
+  per update, the leftover), which update's time the body's moves matched, and the steers that met a held step lock
+  (the physics update running on another thread).
+- **Where it stands.** Steered for the timer's whole time, the proxies trail the breasts by a few tens of centimetres
+  when running. Steering for the simulated substeps is in testing.
 
 ## Stages
 
@@ -66,5 +77,6 @@ The game facts it rests on, with the hard risks, are in [research/HAVOK_WORLD.md
 | `bProxyLayer` | set every A-Body body's proxies back to layer 62 |
 | `bProxyInert` | and "collide with nothing" (bit 14) |
 | `bSteer` | steer your character's proxies every frame |
-| `fProxyMaxSpeed` | above this speed (m/s), a proxy is warped instead of moved |
+| `fProxyMaxSpeed` | above this speed (m/s, default 20), a proxy is warped instead of moved |
 | `bSteerOnce` | when both proxies share one motion, steer it once a frame, through the left proxy |
+| `iSteerTime` | the time each steer's speed is for: 1 = the substeps the update after it simulates (its order measured), 2 = this frame's update, 3 = the next frame's (predicted), 0 = the timer's whole time |

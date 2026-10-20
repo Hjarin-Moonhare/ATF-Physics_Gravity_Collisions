@@ -7,10 +7,13 @@ Releases are the builds A-Body ships.
 - **World collision** (logging build only):
   - the proxies' layer is set back to 62 at runtime;
   - your character's proxies are steered every frame with the game's keyframe function;
-  - above `[World] fProxyMaxSpeed` (10 m/s) or their own speed limit, TF Physics warps them itself, and both limits
+  - above `[World] fProxyMaxSpeed` (20 m/s) or their own speed limit, TF Physics warps them itself, and both limits
     are logged;
   - when both proxies share one Havok motion, it's steered once a frame (`[World] bSteerOnce`). The log shows each
-    proxy's motion, how far behind it is before each steer, and how far the C_Chest ragdoll body is from its bone.
+    proxy's motion, how far behind it is before each steer, and how far the C_Chest ragdoll body is from its bone;
+  - the speed is worked out for the time the physics simulates (its whole substeps), and which frame's update that is
+    is measured from the moves (`[World] iSteerTime`). The log shows the physics timer and the order;
+  - a motion the game has made dynamic (a ragdoll) is never steered.
 - **Collisions with dead bodies** (logging build; off in the releases).
 
 ## 1.3 (A-Body 1.5)

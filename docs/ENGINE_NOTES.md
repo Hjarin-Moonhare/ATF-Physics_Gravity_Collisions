@@ -249,23 +249,30 @@ count at +0x48.
 **Two speed limits.**
 - Havok's `setBodyVelocity` (ID 160867) holds every velocity to the motion's own limit (the w lanes).
 - The keyframe function (below) decides to warp from the table entry's limits.
-- When the two differ, a body can neither keep up nor warp. That happened to the world-collision proxies: see
-  [WORLD_COLLISION.md](WORLD_COLLISION.md).
+- When the two differ, a body can neither keep up nor warp. A-Body's proxies get the game's 100 m/s for both.
 
 **Changing bodies.**
 - **The command queue.** Every bhk change to a body in a world goes through the command queue at `world+0xB60`, which
   is flushed in `bhkWorld::Update` (ID 125011) before the step (ID 125013).
 - **Wrappers:** SetBodyTransform 125070, SetBodyVelocity 125073, ApplyHardKeyframe 125080, SetMotionType 125083.
-  SetBodyVelocity runs at once when ID 125100 says the world can take the change now, and queues it otherwise (ID
-  126158). A non-zero velocity also activates the body (ID 125063).
+  SetBodyTransform and SetBodyVelocity write at once when the body's byte at +0x88 is clear (ID 125101; for a
+  velocity, ID 125100 asks every body on the motion, the ring through +0x84), holding only the shared world lock, and
+  queue otherwise (IDs 126157, 126158); a last byte argument queues the change whatever the flag. A non-zero velocity
+  also activates the body (ID 125063).
 - **Keyframe with warp** (ID 125392): `(co, float transform[16], float step seconds, bool* warped)`.
   - The transform is the rotation rows with w = 0, then the position with w = 1, as the game's node update (ID 125360)
     builds it.
-  - The step is `[bhkWorld+0x7E4]`: the seconds the next physics update simulates. ID 125014 writes it as the leftover
-    at +0x7DC plus the frame's time. It is **not** 1/dt.
+  - The step the game passes is `[bhkWorld+0x7E4]`, in seconds (**not** 1/dt): the leftover plus the frame's time,
+    from the physics timer (below). With fixed substeps the update simulates only its whole substeps, so a body
+    keyframed with it covers part of its gap each update.
   - It computes the velocity that arrives in one step (ID 161979, gap × 1/step). Under the table entry's limits it
     sets that velocity; over them it sets the transform with velocity 0 and reports a warp.
   - With no world, or a step ≤ 0, it does nothing.
+- **The physics timer** (ID 125014 `(bhkWorld*, frame time)`): `+0x7CA` fixed substeps (a byte), `+0x7CC` the
+  frame's time, `+0x7D4` the substep, `+0x7DC` the leftover after this update, `+0x7E4` the leftover before it plus
+  the frame's time, `+0x7E8` this update's substeps: the whole ones that fit in `+0x7E4`, at most `+0x800`. With fixed
+  substeps the leftover is `+0x7E4 - n x substep`. For the main worlds ID 99406 runs it (through IDs 99403 and
+  124990) before ID 99392 builds the frame's job graph; ID 91213 runs it for the menus' 3D worlds.
 - **Plain hard keyframe** (ID 125393): no speed check.
 - **SetCollisionFilterInfo(co, u32)** (ID 125374) = slot 63 (+0x1F8) of the collision object's vtable. In a world it
   queues `bhkSetBodyFilterInfo` (ID 126168).
@@ -275,9 +282,11 @@ count at +0x48.
   125022), in the same world and group as the ragdoll.
 - **But** the add forces layer 8 (`L_BIPED`) on them, and nothing moves them each frame. They're placed again only on
   cell attach: update flag 0x4000, in `bhkNPModelNodeComponent` (ID 125797).
-- **Their motion properties are the game's,** not the ones in the NIF's Havok data. A-Body's proxies get table entry
-  17 (of 80): 100 m/s and 200 rad/s, gravity factor 1, damping 0 / 0.1. Their motions' own limits are 100 / 200 too.
-- **Two proxies in two separate one-body systems report the same motion index,** so they appear to share one motion.
+- **Their motion properties are the game's,** not the ones in the NIF's Havok data. A-Body's proxies get the
+  entry for their world (16 or 17 of 80 outside, 9 of 16 in an interior): 100 m/s and 200 rad/s, gravity factor 1,
+  damping 0 / 0.1. Their motions' own limits are 100 / 200 too.
+- **Both proxies are on the `C_Chest` ragdoll body's motion:** two separate one-body systems, one motion for the
+  three, its centre of mass about 15 cm from each.
 - The living character's `C_Chest` ragdoll body is in the world, and keyframed.
 - The vanilla ragdoll has 20 dynamic bodies on layer 8, with max speeds of 100 m/s and 200 rad/s.
 
@@ -308,6 +317,7 @@ details are in `research\HAVOK_WORLD.md`.
 
 ## Still unknown
 
-- Whether the physics job can overlap the animation jobs (the hook). Nothing so far depends on it.
-- Why the game puts both proxies on one motion: whether it does that for every keyframed body under a skeleton, and
-  whether `C_Chest` shares it too.
+- Whether the physics job runs before or after the actor-update job in a frame, or alongside it. The world-collision
+  steering measures it from the moves.
+- Why the game puts the proxies on the `C_Chest` ragdoll body's motion: whether it does that for every keyframed body
+  under a skeleton.
