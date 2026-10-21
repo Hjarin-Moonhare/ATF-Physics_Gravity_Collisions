@@ -19,7 +19,9 @@
 //                             then the springs' swing scaled by body shape (the body triangle and the part sliders),
 //                             held to the base body's skin stretch (the stretch guard); then collisions: upper arms,
 //                             forearms, hands and thighs push the soft bones, the breasts push each other, other
-//                             bodies push too
+//                             bodies push too, the arms and hands below a breast lift it; then, on a body with a dent
+//                             rig (DentRig.bin), the arms, hands and legs still pressing into its skin dent it
+//                             (dents_core.h)
 // Writes go where the game's own setter writes: the node's local translation and the skeleton rig's copy of it.
 // The installed gravity level (x1, x2, x3) is read from the corrective records themselves; breast gravity also follows
 // the breast size sliders (sfee's morph-target weights on the character's record).
@@ -73,6 +75,9 @@ constexpr bool kCollisions = kDiag;
 #include "lift_data.h"
 #include "body_shape_data.h"
 #include "preset_data.h"
+#include "dents_core.h"
+#include <unordered_map>
+#include <vector>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -110,7 +115,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 25, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 26, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -378,6 +383,9 @@ struct Settings {
     bool couplePushes = true;     // [Collision] bCouplePushes: the bones of one part push as one soft mass
     bool breastSize = true;       // [Collision] bBreastSize: a breast's collision shape, cap and spread follow its size
     bool breastLift = true;       // [Collision] bBreastLift: a breast is lifted over the arms and hands below it
+    bool dents = true;            // [Dents] bEnabled: an arm, a hand or a leg dents the skin it presses (a body with a dent rig)
+    float dentScale = 1.0f;       // ... [Dents] fScale: the dents' depth x this (0 to 3)
+    float dentRelax = 0.06f;      // ... [Dents] fRelaxTime: a dent follows its contact within about this (s; 0 = at once)
     float deadMaxAge = 0.75f;     // ... a dead body lying still is used from a share up to this old (s)
     float maxPushOther = 0.03f;   // ... other bodies push a soft bone at most this far (m), inside its group's cap
     float softScale = 1.1f;       // size of the soft spheres, x the measured size
@@ -481,6 +489,16 @@ static void ReadSettings() {   // from g_iniPath
     g_cfg.couplePushes = GetPrivateProfileIntA("Collision", "bCouplePushes", 1, g_iniPath) != 0;
     g_cfg.breastSize = GetPrivateProfileIntA("Collision", "bBreastSize", 1, g_iniPath) != 0;
     g_cfg.breastLift = GetPrivateProfileIntA("Collision", "bBreastLift", 1, g_iniPath) != 0;
+    g_cfg.dents = GetPrivateProfileIntA("Dents", "bEnabled", 1, g_iniPath) != 0;
+    {
+        char b[64];
+        GetPrivateProfileStringA("Dents", "fScale", "", b, sizeof(b), g_iniPath);
+        const float s = b[0] ? static_cast<float>(atof(b)) : 1.0f;
+        g_cfg.dentScale = !(s >= 0.0f) ? 0.0f : (s > 3.0f ? 3.0f : s);
+        GetPrivateProfileStringA("Dents", "fRelaxTime", "", b, sizeof(b), g_iniPath);
+        const float t = b[0] ? static_cast<float>(atof(b)) : 0.06f;
+        g_cfg.dentRelax = !(t >= 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+    }
     g_cfg.softScale = readC("fSoftScale", g_cfg.softScale);
     g_cfg.softScale = clampf(g_cfg.softScale, 0.5f, 1.5f);
     const char* pushKeys[kNumGroups] = {"fMaxPushBreastCm", "fMaxPushBellyCm", "fMaxPushThighCm", "fMaxPushGluteCm"};
@@ -837,6 +855,19 @@ static std::atomic<std::uint64_t> g_pushes{0};      // soft bones pushed by a co
 static std::atomic<std::uint32_t> g_maxPushMm{0};   // ... and the largest push
 static std::atomic<std::uint64_t> g_lifts{0};       // breasts lifted over an arm or a hand below them
 static std::atomic<std::uint32_t> g_maxLiftMm{0};   // ... and the largest lift
+static std::atomic<std::uint64_t> g_dentSolves{0}, g_dentStill{0};   // regions solved, kept (nothing moved)
+static std::atomic<std::uint64_t> g_dentRuns{0}, g_dentDented{0}, g_dentTicks{0};   // body updates with a dent
+static std::atomic<std::uint32_t> g_dentMaxMm{0}, g_dentBoneMm{0};                    // rig, dented ones, time; the deepest
+// the dent rig (DentRig.bin in the TFPhysics folder, written with the body by A-Body's abody_dent_rig.py)
+static dents::Rig g_dent;
+static bool g_dentOk = false;
+static std::vector<int> g_dentSoft;       // per rig bone: its soft bone (kSoft index; this plugin moves it), else -1
+static std::vector<int> g_dentFollow;     // per rig bone: the soft bone it hangs on (the nipples on Lower), else -1
+static std::vector<int> g_dentMorphSlot;  // per rig slider: a kSliderKey index, 100 + 0/1/2 for Thin/Strong/Overweight
+static std::vector<int> g_dentFirst;      // per region: its first dent bone in the one list of every region's
+static std::vector<std::vector<int>> g_dentReads;   // per region: the rig bones its solve reads (skin, shapes, dent bones' parents)
+constexpr float kDentStill = 0.0003f;     // a region is solved again once one of them moves more than this (m)
+static std::unordered_map<std::string, int> g_dentNames;   // lower-case name -> rig bone, or -(1 + dent bone)
 static std::atomic<std::uint64_t> g_collideTicks{0}, g_collideCalls{0};   // time spent on collisions
 static std::atomic<bool> g_snapDue{false};   // log one body's positions (set every 5 s)
 static std::atomic<std::uint64_t> g_workTicks{0}, g_workCalls{0};
@@ -1095,9 +1126,20 @@ static void MaybeLog() {
         const std::uint64_t calls = g_collideCalls.exchange(0), ticks = g_collideTicks.exchange(0);
         Log("   collisions: %llu bodies checked (%.1f us each), %llu bone pushes, largest %.1f cm; %llu breasts lifted over "
             "an arm below them, largest lift %.1f cm",
-            static_cast<unsigned long long>(calls), calls ? ticks * 1e6 / freq.QuadPart / calls : 0.0,
+            static_cast<unsigned long long>(calls),
+            calls ? static_cast<double>(ticks) * 1e6 / static_cast<double>(freq.QuadPart) / static_cast<double>(calls) : 0.0,
             static_cast<unsigned long long>(g_pushes.exchange(0)), g_maxPushMm.exchange(0) / 10.0,
             static_cast<unsigned long long>(g_lifts.exchange(0)), g_maxLiftMm.exchange(0) / 10.0);
+        if (g_dentOk) {
+            const std::uint64_t runs = g_dentRuns.exchange(0), dentTicks = g_dentTicks.exchange(0);
+            Log("   dents: %llu body updates with a dent rig (%.1f us each), %llu dented, the deepest %.1f cm (a dent bone "
+                "moved %.1f cm); regions solved %llu, kept as they were (nothing moved) %llu",
+                static_cast<unsigned long long>(runs),
+                runs ? static_cast<double>(dentTicks) * 1e6 / static_cast<double>(freq.QuadPart) / static_cast<double>(runs) : 0.0,
+                static_cast<unsigned long long>(g_dentDented.exchange(0)), g_dentMaxMm.exchange(0) / 10.0,
+                g_dentBoneMm.exchange(0) / 10.0, static_cast<unsigned long long>(g_dentSolves.exchange(0)),
+                static_cast<unsigned long long>(g_dentStill.exchange(0)));
+        }
         if (g_cfg.proxies)
             Log("   world proxies: A-Body updates with the proxy nodes %llu (both proxies in a world %llu, their C_Chest "
                 "ragdoll body in a world %llu), without them %llu; your proxies at most %.1f / %.1f cm from their nodes; "
@@ -1471,6 +1513,7 @@ struct ActorView {
     bool paused = false;            // the game is paused this frame (settle[] holds each spring's rest point)
     float collideSize = 1.0f;       // the breast's size for its collision shapes (BodyFactors)
     float breastMorph[kLiftMorphs] = {};   // ... the sliders its skin samples follow
+    float dentMorph[32] = {};       // the dent rig's sliders (BodyFactors)
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -1842,6 +1885,7 @@ struct BodyFactors {
     bool tuned = false;        // a character, outfit or planet factor in use for this body
     float collideSize = 1.0f;  // the breast's size for its collision shapes (1 + 0.5 Large - 0.5 Small, 0.5 .. 1.6)
     float breastMorph[kLiftMorphs] = {};   // ... and the weights of the sliders that move breast skin (lift_data.h)
+    float dentMorph[32] = {};   // the weights of the dent rig's sliders (its own order)
     BodyFactors() {
         for (int p = 0; p < kNumParts; ++p) jiggle[p] = gravity[p] = 1.0f;
     }
@@ -1940,6 +1984,10 @@ static BodyFactors FactorsFrom(const SizeRead& r) {
             for (int k = 0; k < kNumSliders; ++k)
                 if (!strcmp(n, kSliderKey[k])) w = r.slider[k];
         f.breastMorph[m] = w;
+    }
+    for (size_t m = 0; m < g_dentMorphSlot.size() && m < 32; ++m) {   // the dent rig's sliders
+        const int k = g_dentMorphSlot[m];
+        f.dentMorph[m] = (k >= 100 && k < 103) ? r.tri[k - 100] : ((k >= 0 && k < kNumSliders) ? r.slider[k] : 0.0f);
     }
     if (g_cfg.stretchGuard) {
         f.strain = StrainOf(r);
@@ -2156,6 +2204,7 @@ static void TakeFactors(ActorView& v, const BodyFactors& f) {
     v.tuned = f.tuned;
     v.collideSize = f.collideSize;
     std::memcpy(v.breastMorph, f.breastMorph, sizeof(v.breastMorph));
+    std::memcpy(v.dentMorph, f.dentMorph, sizeof(v.dentMorph));
 }
 
 // a spring as tuned.  Its part's level gives it that preset's springs (the bone's in preset_data.h, at the
@@ -4435,6 +4484,302 @@ static void LiftBreasts(const ActorView& v, const BodyNodes& b, Vec3 push[kNumSo
     }
 }
 
+// ------------------------------------------------------------------ dents
+// A body ships its dent rig with it: dent bones in its skin (part bones in naked_f.nif) that ride on a bone and carry
+// that bone's skin weight in a region (a breast, a glute, a thigh), and DentRig.bin in the TFPhysics folder (the
+// samples of each region's skin, the dent bones, the arm, hand and leg shapes).  After the pushes, an arm, a hand or a
+// leg that still presses on a region dents its skin (dents_core.h, the same steps as tools/dent_model.py); with no
+// contact a dent bone sits at its rest place, where the skin moves exactly as before.  A dent follows its contact
+// within about [Dents] fRelaxTime and is written to the dent bone's node and rig copy, the rest written once it ends.
+static void LoadDentRig() {
+    char dir[MAX_PATH], path[MAX_PATH];
+    TuneDir(dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s\\DentRig.bin", dir);
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        Log("dents: no dent rig (%s): the body has no dent bones", path);
+        return;
+    }
+    LARGE_INTEGER sz{};
+    std::vector<std::uint8_t> buf;
+    DWORD got = 0;
+    const bool read = GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (64ll << 20) &&
+                      (buf.resize(static_cast<size_t>(sz.QuadPart)), ReadFile(f, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr)) &&
+                      got == buf.size();
+    CloseHandle(f);
+    std::string err;
+    if (!read || !dents::Load(buf.data(), buf.size(), g_dent, err)) {
+        Log("dents: %s not read: %s", path, read ? err.c_str() : "a read error");
+        return;
+    }
+    const size_t nb = g_dent.bones.size();
+    g_dentSoft.assign(nb, -1);
+    g_dentFollow.assign(nb, -1);
+    for (size_t i = 0; i < nb; ++i) {
+        const std::string& n = g_dent.bones[i].name;
+        for (int k = 0; k < kNumSoft; ++k)
+            if (!_stricmp(n.c_str(), kSoft[k].name)) g_dentSoft[i] = k;
+        if (n.size() == 8 && !_stricmp(n.c_str() + 1, "_Nipple")) {   // L_Nipple / R_Nipple hang on the breast's Lower bone
+            char low[40];
+            snprintf(low, sizeof(low), "TF_Breast_Lower_%c", n[0]);
+            for (int k = 0; k < kNumSoft; ++k)
+                if (!_stricmp(low, kSoft[k].name)) g_dentFollow[i] = k;
+        }
+    }
+    g_dentMorphSlot.assign(g_dent.morphs.size(), -1);
+    for (size_t m = 0; m < g_dent.morphs.size(); ++m) {
+        const std::string& n = g_dent.morphs[m];
+        if (n == "Thin") g_dentMorphSlot[m] = 100;
+        else if (n == "Strong") g_dentMorphSlot[m] = 101;
+        else if (n == "Overweight") g_dentMorphSlot[m] = 102;
+        else
+            for (int k = 0; k < kNumSliders; ++k)
+                if (n == kSliderKey[k]) g_dentMorphSlot[m] = k;
+    }
+    g_dentNames.clear();
+    auto lower = [](std::string x) {
+        for (char& c : x) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        return x;
+    };
+    for (size_t i = 0; i < nb; ++i) g_dentNames.emplace(lower(g_dent.bones[i].name), static_cast<int>(i));
+    g_dentReads.clear();
+    for (const dents::Region& R : g_dent.regions) {   // the bones a region's solve reads
+        std::vector<std::uint8_t> on(nb, 0);
+        for (const dents::Lbs& l : R.lbs) on[l.bone] = 1;
+        for (const dents::DentBone& d : R.dent) on[static_cast<size_t>(d.parent)] = 1;
+        for (std::uint16_t u : R.use) {
+            const dents::Collider& c = g_dent.colliders[u];
+            if (c.a >= 0) on[static_cast<size_t>(c.a)] = 1;
+            if (c.b >= 0) on[static_cast<size_t>(c.b)] = 1;
+            if (c.tipParent >= 0) on[static_cast<size_t>(c.tipParent)] = 1;
+        }
+        std::vector<int> list;
+        for (size_t i = 0; i < nb; ++i)
+            if (on[i]) list.push_back(static_cast<int>(i));
+        g_dentReads.push_back(std::move(list));
+    }
+    g_dentFirst.clear();
+    int k = 0;
+    char regions[512] = "";
+    for (const dents::Region& R : g_dent.regions) {
+        g_dentFirst.push_back(k);
+        for (const dents::DentBone& d : R.dent) {
+            const std::string key = lower(d.name);
+            g_dentNames[key] = -1 - k++;
+        }
+        const size_t len = strlen(regions);
+        snprintf(regions + len, sizeof(regions) - len, "%s%s %zu (%zu samples)", len ? ", " : "", R.name.c_str(),
+                 R.dent.size(), R.samples.size());
+    }
+    g_dentOk = true;
+    Log("dents: rig %s: %d dent bones in %zu regions: %s; %zu bones, %zu arm, hand and leg shapes, %zu sliders", path,
+        g_dent.totalDent, g_dent.regions.size(), regions, nb, g_dent.colliders.size(), g_dent.morphs.size());
+}
+
+struct DentBody {
+    void* com = nullptr;
+    std::vector<void*> bone, dent, dentName;   // the rig's bones and dent bones (one list of every region's), names
+    std::vector<float> last;                   // the dent each dent bone shows (m, along its inward line)
+    std::vector<float> solved;                 // each dent bone's dent from its region's last solve
+    std::vector<std::vector<dents::V3>> seen;  // per region: the bones it read at that solve (world positions)
+    std::vector<float> seenMorph;              // ... and the sliders
+    std::vector<std::uint8_t> written;
+    bool complete = false;
+    std::uint64_t retryMs = 0, usedMs = 0;
+};
+static std::mutex g_dentMutex;
+constexpr int kDentSlots = 64;
+static DentBody g_dentBodies[kDentSlots];
+static std::atomic<int> g_dentFoundLogs{0};
+
+static void FindDentNodes(void* com, DentBody& d) {   // every node under COM, by name in any case
+    d.bone.assign(g_dent.bones.size(), nullptr);
+    const size_t total = static_cast<size_t>(g_dent.totalDent);
+    d.dent.assign(total, nullptr);
+    d.dentName.assign(total, nullptr);
+    void* stack[1024];
+    int sp = 0, visited = 0;
+    stack[sp++] = com;
+    char name[96];
+    while (sp && visited < 8192) {
+        void* n = stack[--sp];
+        ++visited;
+        if (NodeName(n, name, sizeof(name))) {
+            for (char* c = name; *c; ++c) *c = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
+            const auto it = g_dentNames.find(name);
+            if (it != g_dentNames.end()) {
+                if (it->second >= 0) {
+                    const size_t i = static_cast<size_t>(it->second);
+                    if (!d.bone[i]) d.bone[i] = n;
+                } else {
+                    const size_t k = static_cast<size_t>(-1 - it->second);
+                    if (!d.dent[k]) {
+                        d.dent[k] = n;
+                        SafeCopy(&d.dentName[k], static_cast<char*>(n) + 0x10, 8);
+                    }
+                }
+            }
+        }
+        void* kids[256];
+        const int nk = Children(n, g_childLayout, kids, 256);
+        for (int i = 0; i < nk && sp < 1024; ++i) stack[sp++] = kids[i];
+    }
+    int found = 0;
+    for (void* x : d.dent) found += x != nullptr;
+    bool carriers = true;
+    for (const dents::Region& R : g_dent.regions)
+        for (const dents::DentBone& b : R.dent) carriers = carriers && d.bone[static_cast<size_t>(b.parent)];
+    d.complete = found == g_dent.totalDent && carriers;
+    d.last.assign(total, 0.0f);
+    d.solved.assign(total, 0.0f);
+    d.seen.assign(g_dent.regions.size(), {});
+    d.seenMorph.clear();
+    d.written.assign(total, 0);
+    if (found && g_dentFoundLogs.fetch_add(1) < 8)
+        Log("dents: a body (%p): %d of %d dent bones found in %d nodes, their bones %s", com, found, g_dent.totalDent, visited,
+            carriers ? "all there" : "missing");
+}
+
+static bool DentStillValid(const DentBody& d) {
+    for (size_t k = 0; k < d.dent.size(); ++k) {
+        void* name = nullptr;
+        if (!SafeCopy(&name, static_cast<char*>(d.dent[k]) + 0x10, 8) || name != d.dentName[k]) return false;
+    }
+    return true;
+}
+
+static dents::Xf ToDentXf(const Xf& x) {
+    dents::Xf o;
+    for (int i = 0; i < 3; ++i) o.ax[i] = {x.ax[i].x, x.ax[i].y, x.ax[i].z};
+    o.pos = {x.pos.x, x.pos.y, x.pos.z};
+    o.scale = x.scale;
+    return o;
+}
+
+static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], const Vec3 push[kNumSoft],
+                  const bool pushOn[kNumSoft], const bool have[kNumSoft], float actorScale) {
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    const std::uint64_t now = GetTickCount64();
+    DentBody* d = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_dentMutex);
+        int free = -1, oldest = -1;
+        for (int i = 0; i < kDentSlots && !d; ++i) {
+            DentBody& s = g_dentBodies[i];
+            if (s.com == v.com) d = &s;
+            else if (!s.com && free < 0) free = i;
+            else if (s.com && now - s.usedMs > 2000 && (oldest < 0 || s.usedMs < g_dentBodies[oldest].usedMs)) oldest = i;
+        }
+        if (!d) {
+            const int slot = free >= 0 ? free : oldest;
+            if (slot < 0) return;   // 64 bodies with a dent rig updated in the last 2 s: this one waits
+            d = &g_dentBodies[slot];
+            *d = DentBody{};
+            d->com = v.com;
+        }
+        d->usedMs = now;
+    }
+    if (d->complete && !DentStillValid(*d)) {
+        d->complete = false;
+        d->retryMs = 0;
+    }
+    if (!d->complete) {
+        if (now < d->retryMs) return;
+        FindDentNodes(v.com, *d);
+        d->retryMs = now + 2000;
+        if (!d->complete) return;
+    }
+    // the bones' world transforms; the soft bones where this frame's springs and pushes put them
+    static thread_local std::vector<dents::Xf> world;
+    static thread_local std::vector<std::uint8_t> hv;
+    const size_t nb = g_dent.bones.size();
+    world.resize(nb);
+    hv.resize(nb);
+    for (size_t i = 0; i < nb; ++i) {
+        Xf x;
+        hv[i] = d->bone[i] && WorldOf(d->bone[i], x);
+        if (!hv[i]) continue;
+        world[i] = ToDentXf(x);
+        const int s = g_dentSoft[i];
+        if (s >= 0 && have[s]) {
+            const Vec3 p = pushOn[s] ? Add(pos[s], push[s]) : pos[s];
+            world[i].pos = {p.x, p.y, p.z};
+        }
+        const int f = g_dentFollow[i];
+        Xf own;
+        if (f >= 0 && have[f] && WorldOf(b.node[SoftN(f)], own)) {   // moved with the soft bone it hangs on
+            const Vec3 p = pushOn[f] ? Add(pos[f], push[f]) : pos[f];
+            const Vec3 shift = Sub(p, own.pos);
+            world[i].pos = {world[i].pos.x + shift.x, world[i].pos.y + shift.y, world[i].pos.z + shift.z};
+        }
+    }
+    static thread_local dents::Work wk;
+    static thread_local std::vector<float> D;
+    const float dt = *reinterpret_cast<const float*>(g_addr[kFrameTime]);
+    const float a = (dt > 0.0f && dt < 0.5f && g_cfg.dentRelax > 0.0f) ? 1.0f - std::exp(-dt / g_cfg.dentRelax) : 1.0f;
+    bool dented = false;
+    float deepest = 0.0f, most = 0.0f;
+    const size_t nm = g_dent.morphs.size() < 32 ? g_dent.morphs.size() : 32;
+    const bool sameMorph = d->seenMorph.size() == nm && !std::memcmp(d->seenMorph.data(), v.dentMorph, nm * sizeof(float));
+    if (!sameMorph) d->seenMorph.assign(v.dentMorph, v.dentMorph + nm);
+    for (size_t r = 0; r < g_dent.regions.size(); ++r) {
+        const dents::Region& R = g_dent.regions[r];
+        D.resize(R.dent.size());
+        const int first = g_dentFirst[r];
+        // still since its last solve: the same dents
+        const std::vector<int>& reads = g_dentReads[r];
+        std::vector<dents::V3>& seen = d->seen[r];
+        bool still = sameMorph && seen.size() == reads.size();
+        for (size_t q = 0; still && q < reads.size(); ++q) {
+            const size_t i = static_cast<size_t>(reads[q]);
+            const dents::V3 p = hv[i] ? world[i].pos : dents::V3{1e9f, 1e9f, 1e9f};
+            still = std::fabs(p.x - seen[q].x) < kDentStill && std::fabs(p.y - seen[q].y) < kDentStill &&
+                    std::fabs(p.z - seen[q].z) < kDentStill;
+        }
+        if (still) {
+            for (size_t j = 0; j < R.dent.size(); ++j) D[j] = d->solved[static_cast<size_t>(first) + j];
+            g_dentStill.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            dents::RegionStats st;
+            dents::SolveRegion(g_dent, R, world.data(), hv.data(), v.dentMorph, g_cfg.dentScale, actorScale, D.data(), &st, wk);
+            if (st.contacts) deepest = std::fmax(deepest, st.dent);
+            seen.resize(reads.size());
+            for (size_t q = 0; q < reads.size(); ++q) {
+                const size_t i = static_cast<size_t>(reads[q]);
+                seen[q] = hv[i] ? world[i].pos : dents::V3{1e9f, 1e9f, 1e9f};
+            }
+            for (size_t j = 0; j < R.dent.size(); ++j) d->solved[static_cast<size_t>(first) + j] = D[j];
+            g_dentSolves.fetch_add(1, std::memory_order_relaxed);
+        }
+        for (size_t j = 0; j < R.dent.size(); ++j) {
+            const size_t k = static_cast<size_t>(first) + j;
+            float x = d->last[k] + (D[j] - d->last[k]) * a;
+            if (D[j] == 0.0f && x < 1e-4f) x = 0.0f;
+            d->last[k] = x;
+            if (x > 0.0f || d->written[k]) {
+                const dents::DentBone& db = R.dent[j];
+                const float t[3] = {db.rest.x + db.inward.x * x, db.rest.y + db.inward.y * x, db.rest.z + db.inward.z * x};
+                if (!g_cfg.measureOnly) WriteTranslation(d->dent[k], t);
+                d->written[k] = x > 0.0f;
+            }
+            if (x > 0.0f) dented = true;
+            most = std::fmax(most, x);
+        }
+    }
+    g_dentRuns.fetch_add(1, std::memory_order_relaxed);
+    if (dented) g_dentDented.fetch_add(1, std::memory_order_relaxed);
+    auto keepMax = [](std::atomic<std::uint32_t>& m, float metres) {
+        const std::uint32_t mm = static_cast<std::uint32_t>(metres * 1000);
+        std::uint32_t prev = m.load(std::memory_order_relaxed);
+        while (mm > prev && !m.compare_exchange_weak(prev, mm)) {}
+    };
+    keepMax(g_dentMaxMm, deepest);
+    keepMax(g_dentBoneMm, most);
+    QueryPerformanceCounter(&t1);
+    g_dentTicks.fetch_add(static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
+}
+
 static void Collide(ActorView& v) {
     if (g_layoutState.load() == 0)
         for (const Anchor& a : v.anchors)
@@ -4680,6 +5025,7 @@ static void Collide(ActorView& v) {
         std::uint32_t prev = g_maxPushMm.load(std::memory_order_relaxed);
         while (mm > prev && !g_maxPushMm.compare_exchange_weak(prev, mm)) {}
     }
+    if (g_cfg.dents && g_dentOk) Dents(v, b, pos, push, pushOn, have, size);
     if (snap) Log("  contacts (distance/contact cm):%s", cl ? contacts : " none");
 
     // share this body's shapes for the bodies near it: soft bones where they are this frame (gravity in, no pushes)
@@ -5171,8 +5517,8 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     g_mainThread = GetCurrentThreadId();
     g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
     LoadSettings();
-    Log("TF Physics (logging build: gravity, springs, body shape, tuning files, collisions, world-collision "
-        "proxies). "
+    Log("TF Physics (logging build: gravity, springs, body shape, tuning files, collisions, dents, "
+        "world-collision proxies). "
         "SFSE 0x%08X, game %u.%u.%u (runtime 0x%08X)", sfse->sfseVersion, sfse->runtimeVersion >> 24,
         (sfse->runtimeVersion >> 16) & 0xFF, (sfse->runtimeVersion >> 4) & 0xFFF, sfse->runtimeVersion);
     Log("lying also needs the thighs flat: %.0f-%.0f deg from vertical", g_cfg.thighFlatStartDeg, g_cfg.thighFlatFullDeg);
@@ -5205,6 +5551,8 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         g_cfg.breastSize, g_cfg.breastLift, kLiftSamplesL, kLiftSamplesR, kNumLiftLimbs);
     Log("other bodies push at most %.1f cm; dead bodies %d (a dead body lying still: its shapes used up to %.0f ms old)",
         g_cfg.maxPushOther * 100, g_cfg.deadBodies, g_cfg.deadMaxAge * 1000);
+    LoadDentRig();
+    Log("dents %d: depth x%.2f, a dent follows its contact within %.0f ms", g_cfg.dents, g_cfg.dentScale, g_cfg.dentRelax * 1000);
     Log("body shape %d: jiggle x(1 %+.2f thin %+.2f muscular %+.2f heavy), gravity x(1 %+.2f thin %+.2f muscular %+.2f "
         "heavy), belly heavy x%.2f; parts: butt %.2f, hips %.2f, thighs %.2f, calves %.2f, arms %.2f, waist %.2f; damping "
         "follows %.2f; each factor %.2f to %.2f; override jiggle %.2f, gravity %.2f; breast stretch guard %d", g_cfg.shape,

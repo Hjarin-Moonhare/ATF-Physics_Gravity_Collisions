@@ -38,7 +38,7 @@ if(TFP_TESTS)
     add_custom_target(tfp_test_ini ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${tfp_test_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/config/TFPhysics.ini" "${tfp_test_dir}/TFPhysics.ini")
-    foreach(t collide_test gravity_test shape_test addrlib_test stress_test)
+    foreach(t collide_test gravity_test shape_test dent_test addrlib_test stress_test)
         add_executable(${t} tests/${t}.cpp)
         target_compile_options(${t} PRIVATE /W4 /EHsc)
         target_link_libraries(${t} PRIVATE shell32 ole32)

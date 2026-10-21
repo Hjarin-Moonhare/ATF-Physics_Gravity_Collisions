@@ -4,6 +4,16 @@ Releases are the builds A-Body ships.
 
 ## Development (this source)
 
+- **Dents:** on a body that ships dent bones and a dent rig (`DentRig.bin` in `Data\SFSE\Plugins\TFPhysics\`),
+  an arm, a hand or a leg still pressing into a breast, a glute or a thigh after the pushes dents its skin
+  (`src\dents_core.h`). A dent bone rides on a bone of the body and carries that bone's skin weight in its region,
+  so with no contact the skin moves exactly as before. Per region, the rig's skin samples are placed from their bones
+  and the sliders; a sample inside an arm, hand or leg shape needs the inward move that takes it out, up to the rig's
+  limit; the wanted dent fades out around the contacts, and the dent bones' inward moves are its smoothed fit, never
+  outward and within each bone's largest move, with a guard against overshoot. A dent follows its contact within
+  `[Dents] fRelaxTime` (0.06 s), x `[Dents] fScale` (0 to 3); a region none of whose bones moved more than 0.3 mm
+  keeps its last dents. `[Dents] bEnabled` (on unless set to 0). In the logging build and the release build with
+  collisions.
 - **Even steps** for the tuning levels: Minimal x0.25, Lower x0.5, Realistic, Low x1.25, Medium x1.5, High x2, Max x2.5
   and Ultra x3 of Realistic's movement, each a preset's springs with the swing that makes its number (`kLevelSwing`).
   A level's swing no longer moves the damping.

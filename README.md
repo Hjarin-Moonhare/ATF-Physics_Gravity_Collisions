@@ -34,13 +34,17 @@ match, it patches nothing and says why in its log.
   - the bones of one part are pushed as one soft mass, so a press bends the skin instead of folding it;
   - arms and hands below a breast lift it, its skin over tight shapes of the forearm, the palm and every finger joint;
   - a breast's collision shape follows its size sliders.
+- Dents: on a body with dent bones, an arm, a hand or a leg still pressing into a breast, a glute or a thigh dents
+  its skin. With nothing pressing, the skin moves as before.
 - World collision (logging build only): two Havok proxy bodies per A-Body body, steered to the breasts every frame.
   They collide with nothing yet. See [docs/WORLD_COLLISION.md](docs/WORLD_COLLISION.md).
 
 ## Status
 
 - TF Physics 1.3 ships in A-Body 1.5. It's the `build_release_collisions.bat` build.
-- This source is 1.3 plus the tuning files (every build) and the world-collision work (logging build).
+- This source is 1.3 plus everything under Development in [CHANGELOG.md](CHANGELOG.md): the tuning files and the
+  gravity work (every build), the collision work and the dents (the builds with collisions), and the world
+  collision (logging build).
 - It was read from Starfield 1.16.244. SFSE loads it on any game version that has an Address Library database, and
   the start-up checks decide whether it runs.
 
@@ -73,13 +77,14 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 
 None of the tests need the game ([tests/README.md](tests/README.md) has the details):
 - **`tests\run_tests.bat`:**
-  - collisions on A-Body's skeleton in ten poses, other and dead bodies;
+  - collisions on A-Body's skeleton in 13 poses, other and dead bodies;
   - the world proxies, against stand-ins for the game's Havok functions;
   - gravity and body shape;
   - the tuning files: each level against the preset table, Ultra, the match, the travel limits, back to the
     installed springs bit for bit, the multipliers, characters, outfits, the planet, the files read again;
   - the breast gravity levels: the installed one held at its largest levels, one for every body and one per shape,
     the spring gravity of every part and the other parts' gravity shapes;
+  - the dents against their design model, on A-Body's two dent rigs (50 and 156 dent bones);
   - the Address Library reader, and every start-up check on a fake game image.
 
   If it finds the game (through `STARFIELD_DIR`, or the usual Steam folders), it also runs the checks on the real
@@ -87,7 +92,7 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
 - **`tests\tune_dump.exe <TFPhysics.ini>`** (built by `run_tests.bat`): how a TFPhysics.ini and its tuning files
   are read, with the plugin's own reader.
 - **`tests\run_stress.bat`:** many bodies on 11 threads, the memory guards, and the cost per body.
-- **`tests\run_analyze.bat`:** MSVC `/analyze`. 30 known warnings.
+- **`tests\run_analyze.bat`:** MSVC `/analyze`. 27 known warnings.
 
 ## Trying a build in game
 
@@ -100,8 +105,8 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
 
 | Folder | What's in it |
 |---|---|
-| `src\` | `plugin.cpp`, plus three generated data headers: collision sizes, body-shape limits and the physics presets' springs. |
-| `tests\` | The offline tests, A-Body's skeleton in ten poses (`tests\cases\`), and the scripts that run them. |
+| `src\` | `plugin.cpp`, `dents_core.h` (the dents' file reader and solve, no game types), and four generated data headers: collision sizes, the breast lift's skin samples, body-shape limits and the physics presets' springs. |
+| `tests\` | The offline tests, A-Body's skeleton in 13 poses (`tests\cases\`), A-Body's two dent rigs (`tests\data\`) in nine of them (`tests\cases_dent\`), and the scripts that run them. |
 | `config\` | The logging build's INI, and A-Body 1.5's release INIs (Fixed and Variable presets). |
 | `docs\` | The design rules, how it works, the engine notes, the body requirements, the tuning files and world collision. `docs\research\` holds the game facts behind them, with the hard risks. |
 | `tools\` | `vcvars.bat` for the scripts, `package_build.py`, `re\` (read-only tools for `Starfield.exe`), and the scripts that measured the data headers (they need A-Body's own build tools). See `tools\README.md`. |
@@ -118,7 +123,8 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
 3. **After it:**
    - the breast anchors follow the chest's tilt, with per-bone shapes;
    - the jiggle is scaled per part (body shape and tuning);
-   - collisions push the soft bones.
+   - collisions push the soft bones;
+   - an arm, a hand or a leg still pressing into the skin dents it (a body with a dent rig).
 
    Writes go where the game's own setter writes: the node's local transform and the rig's copy.
 4. **Every other character** only lends its shapes to the A-Body bodies near it.
@@ -134,7 +140,8 @@ game structures behind them.
   - world collision: items, push-back, NPCs;
   - a data-driven body definition, so other bodies can use TF Physics. For example, ones built on SF Extended
     Skeleton.
-- **Known limits:** crossed arms clip through, sitting doesn't move the belly, and deep squats are only partly handled.
+- **Known limits:** a dent moves only the skin its dent bones carry, so a forearm pressed hard into a breast (crossed
+  arms) still goes in by up to about 1 cm; sitting doesn't move the belly, and deep squats are only partly handled.
 
 ## Thanks
 

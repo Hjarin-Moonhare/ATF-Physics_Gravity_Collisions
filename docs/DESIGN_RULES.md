@@ -194,3 +194,11 @@ the code does instead.
   the chest instead of lifting it.
 - Fix: the breast's skin samples are lifted, along the chest's up axis, over the forearms and hands below them, with
   the forearms and level upper arms above as a ceiling; the breast's spheres, cap and spread go with its size.
+
+**31. A skin an arm still presses gives way around it.**
+- Breaks: the soft bones move a whole breast, glute or thigh. What their pushes leave goes into the arm with a hard
+  edge where the arm meets the skin, and a harder push only moves the part away from the arm.
+- Fix: dent bones carry part of the skin, each with its parent bone's weight in its region, so with no contact the
+  skin moves exactly as before. After the pushes, the skin an arm, a hand or a leg still presses gets the inward move
+  that takes it out, faded out around the contact; the dent bones move inward by the smoothed fit to it, never
+  outward and each within its largest move, and a sample dented past its want weighs more in the next round.

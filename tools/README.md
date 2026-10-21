@@ -7,7 +7,7 @@ Run everything from the package folder, the one with `build.bat`.
 | `vcvars.bat` | Puts the 64-bit MSVC tools on PATH for every build and test script. | Visual Studio 2022 or newer, or its Build Tools |
 | `package_build.py` | Zips the logging build and its INI for a tester. | Python 3, a built `build\TFPhysics.dll` |
 | `re\` | Reads `Starfield.exe` from disk: Address Library IDs, disassembly, vtables, callers. See `re\README.md`. | Python 3.10+, capstone, numpy, the game |
-| The measuring scripts | Measure A-Body, and write the three data headers and the test poses. See "Where the numbers come from" below. | A-Body's build tools |
+| The measuring scripts | Measure A-Body, and write the data headers, the test poses and the dent cases. See "Where the numbers come from" below. | A-Body's build tools |
 
 ## vcvars.bat
 
@@ -60,17 +60,19 @@ who calls a function, and which code uses a string. Each one is described in `re
 
 ## Where the numbers come from
 
-These scripts measured the numbers in `src\collision_data.h`, `src\body_shape_data.h` and `src\preset_data.h`, and wrote the test poses in
-`tests\cases\`. They show how each number was made, and they rebuild the files when A-Body's mesh, skeleton or physics
-presets change. On A-Body's data they write the shipped files again, line for line.
+These scripts measured the numbers in `src\collision_data.h`, `src\lift_data.h`, `src\body_shape_data.h` and
+`src\preset_data.h`, and wrote the test poses in `tests\cases\` and the dent cases in `tests\cases_dent\`. They
+show how each number was made, and they rebuild the files when A-Body's mesh, skeleton or physics presets change.
+On A-Body's data they write the shipped files again, line for line.
 
 **What they need.** They read A-Body's mesh, skeleton and presets through A-Body's own build tools, which aren't part
 of this package:
 
 | Variable | The folder | Used by |
 |---|---|---|
-| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `p3_spring_sim.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` |
+| `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `p3_spring_sim.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` and `dent_model.py` |
 | `ABODY_AUDIT` | A-Body's build tree, with the physics preset and jiggle tables | `gen_body_shape_data.py`, `gen_preset_data.py` |
+| `ABODY_BUILDS` | A-Body's builds folder, with its two dent rigs (`A-Body_DentRig_A`, `A-Body_DentRig_B`) | `tests\export_dent_cases.py` (or the two rig folders as its arguments) |
 
 `natural_rest.py` also reads `reports\phase3\physics\collision\sizes.json` from the build tree that A-Body's `v06.py`
 points at. They need Python 3 with numpy (A-Body's tools also need scipy), and each one takes a second or two.
@@ -80,15 +82,17 @@ points at. They need Python 3 with numpy (A-Body's tools also need scipy), and e
 ```
 set ABODY_TOOLS=C:\path\to\A-Body\tools
 set ABODY_AUDIT=C:\path\to\A-Body
+set ABODY_BUILDS=C:\path\to\A-Body\builds
 python tools\glute_sizes.py
 python tools\gen_collision_data.py
 python tests\export_collision_cases.py
+python tests\export_dent_cases.py
 python tools\gen_body_shape_data.py
 python tools\gen_preset_data.py
 ```
 
 Then build, and run `tests\run_tests.bat`: `collide_test` checks the plugin, with the new header, against the new
-poses. The scripts write Windows line ends; `.gitattributes` (`* text=auto`) evens those out, so git shows no change
+poses, and `dent_test` against the new dent cases. The scripts write Windows line ends; `.gitattributes` (`* text=auto`) evens those out, so git shows no change
 when the numbers are the same.
 
 ### glute_sizes.py: tools\data\sizes_glute.json
@@ -163,9 +167,9 @@ that holds 95% of the skin nearest to it). `lift_model.py` is the same lift for 
 
 ### ..\tests\export_collision_cases.py: tests\cases\*.txt
 
-Poses A-Body's skeleton ten ways, and writes what `collide_test.cpp` checks the plugin against: `rest`, `arms_forward`,
-`arms_crossed`, `sitting`, `deep_squat`, `sprint_stride`, `arms_sides`, `arms_hanging`, `hands_on_glutes` and
-`hands_on_glutes_firm`. The expected pushes are worked out here, not by the plugin's code: the same contact rule, half
+Poses A-Body's skeleton 13 ways, and writes what `collide_test.cpp` checks the plugin against: `rest`, `arms_forward`,
+`arms_crossed`, `sitting`, `deep_squat`, `sprint_stride`, `arms_sides`, `arms_hanging`, `hands_on_glutes`,
+`hands_on_glutes_firm`, and from `arm_poses.py` `folded`, `clasped` and `across`. The expected pushes are worked out here, not by the plugin's code: the same contact rule, half
 for soft against soft, capped per group, and a part's pushes coupled the same way.
 
 Each file, in metres:
@@ -184,6 +188,20 @@ It prints each pose's node count and largest push:
 ```
 arms_crossed   218 nodes, largest designed push 5.00 cm
 ```
+
+### dent_model.py
+
+The dents' design model, in numpy: `load()` reads a `DentRig.bin`, and `solve_region()` runs one region's solve on
+the bones' world transforms with the same steps as `src\dents_core.h`. `dent_test` holds the plugin to it through
+the cases `export_dent_cases.py` writes. It needs only numpy.
+
+### ..\tests\export_dent_cases.py: tests\cases_dent\*.txt
+
+Copies A-Body's two dent rigs to `tests\data\`, and for each rig takes nine of the poses `export_collision_cases.py`
+makes (`rest`, `arms_crossed`, `arms_forward`, `hands_on_glutes`, `hands_on_glutes_firm`, `sitting`, `folded`,
+`clasped`, `across`), moves each soft bone and everything under it by the design's push, and writes what
+`dent_test.cpp` checks: per pose, at the base sliders and with the breast, butt and thigh sliders at 0.5, every rig
+bone's world transform and the dent bones' moves the model gives. It prints each case's contacts and deepest dent.
 
 ### gen_body_shape_data.py: src\body_shape_data.h
 

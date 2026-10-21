@@ -24,7 +24,6 @@ POSE_FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clip_stud
 MOD_POSES = tuple(n for n in ("armcrossed_pose", "finger_pose", "choked_pose")
                   if os.path.exists(os.path.join(POSE_FILES, n + ".json")))
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases")
-os.makedirs(OUT, exist_ok=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -122,28 +121,40 @@ P["arms_hanging"] = [op for s in "LR" for op in (
 P["hands_on_glutes"] = natural_rest.hands_on_glutes(skel, base, 30, 20)        # the glute group
 P["hands_on_glutes_firm"] = natural_rest.hands_on_glutes(skel, base, 30, 28)
 ARMS = arm_poses.three(skel, base)
-for pname in POSES + MOD_POSES:
+
+
+def world_of(pname):
+    """The skeleton (name -> 4x4 world) in one of the poses."""
     if pname in MOD_POSES:
         import af_pose  # noqa: E402
-        world = af_pose.apply_rotations(skel, base, json.load(open(os.path.join(POSE_FILES, pname + ".json")))["rotations_xyzw"])
-    elif pname in ARMS:
-        world = ARMS[pname]
-    else:
-        world = base if pname == "rest" else v06.pose(skel, P[pname], base)
-    lines = []
-    for name in world:
-        W = world[name]
-        par = skel[name]["parent"]
-        if par in world:
-            Wp = world[par]
-            local = Wp[:3, :3].T @ (W[:3, 3] - Wp[:3, 3])
-        else:
-            par, local = "-", W[:3, 3]
-        rows = [W[:3, k] for k in range(3)]   # the game's rows are the axes
-        nums = list(local) + [x for r in rows for x in r] + list(W[:3, 3])
-        lines.append(f"N {token(name)} {token(par)} " + " ".join(f"{x:.7f}" for x in nums))
-    for n, p in pushes(world).items():
-        lines.append(f"E {n} " + " ".join(f"{x:.7f}" for x in p))
-    open(os.path.join(OUT, f"{pname}.txt"), "w").write("\n".join(lines) + "\n")
-    big = max(np.linalg.norm(p) for p in pushes(world).values())
-    print(f"{pname:14s} {len(world)} nodes, largest designed push {big * 100:.2f} cm")
+        return af_pose.apply_rotations(skel, base, json.load(open(os.path.join(POSE_FILES, pname + ".json")))["rotations_xyzw"])
+    if pname in ARMS:
+        return ARMS[pname]
+    return base if pname == "rest" else v06.pose(skel, P[pname], base)
+
+
+def main():
+    for pname in POSES + MOD_POSES:
+        world = world_of(pname)
+        lines = []
+        for name in world:
+            W = world[name]
+            par = skel[name]["parent"]
+            if par in world:
+                Wp = world[par]
+                local = Wp[:3, :3].T @ (W[:3, 3] - Wp[:3, 3])
+            else:
+                par, local = "-", W[:3, 3]
+            rows = [W[:3, k] for k in range(3)]   # the game's rows are the axes
+            nums = list(local) + [x for r in rows for x in r] + list(W[:3, 3])
+            lines.append(f"N {token(name)} {token(par)} " + " ".join(f"{x:.7f}" for x in nums))
+        for n, p in pushes(world).items():
+            lines.append(f"E {n} " + " ".join(f"{x:.7f}" for x in p))
+        open(os.path.join(OUT, f"{pname}.txt"), "w").write("\n".join(lines) + "\n")
+        big = max(np.linalg.norm(p) for p in pushes(world).values())
+        print(f"{pname:14s} {len(world)} nodes, largest designed push {big * 100:.2f} cm")
+
+
+if __name__ == "__main__":
+    os.makedirs(OUT, exist_ok=True)
+    main()

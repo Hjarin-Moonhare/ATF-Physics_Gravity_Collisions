@@ -6,7 +6,8 @@ each Address Library ID. This page is the map.
 ## Start-up (`SFSEPlugin_Load`)
 
 1. **The log opens** (logging build only).
-2. **The INI is read** (`LoadSettings`). Every value is clamped, NaN-safe.
+2. **The INI is read** (`LoadSettings`). Every value is clamped, NaN-safe. Then the body's dent rig, if it ships one
+   (`LoadDentRig`: `DentRig.bin` in `Data\SFSE\Plugins\TFPhysics\`).
 3. **Game addresses resolve** from the Address Library database the running game would use
    (`ReadAddressLibrary`, `ResolveAddresses`). There are 25 core entries in `kAddrRef`, each an ID plus an offset for
    a place inside a function. Optional ones live in `kWorldAddrRef`; when one of those fails, only that feature turns
@@ -70,7 +71,8 @@ reset (slot 2) when it isn't. Three call sites call that loop:
    - `ScaleJiggle` scales each spring's swing by the body shape and the tuning; on a paused frame `PausedSettle` puts
      every soft bone at its rest point instead;
    - `AddSettle` puts the other parts' gravity shapes on their bones;
-   - `Collide` pushes the soft bones;
+   - `Collide` pushes the soft bones, then `Dents` dents the skin an arm, a hand or a leg still presses (a body with
+     a dent rig, see Dents below);
    - `AddOnTopAll` writes the per-bone results;
    - `Share` publishes this body's shapes for the bodies near it.
 6. **Logging build only:** `WatchProxies` (the world collision) and `MaybeLog`. Every 5 s the log thread writes what
@@ -105,6 +107,7 @@ main thread. All state is per body, keyed by game pointers:
 | Body nodes | `COM` | every bone the collisions use, found once by name | a mutex on insert; checked again by name pointer |
 | Factors | 3D root | size, shape and stretch-guard factors | 4-way cache |
 | Other bodies (128) | `COM` | copied shapes, centre, velocity, time | seqlock: readers skip odd or stale entries and shift by velocity × age |
+| Dent bodies (64) | `COM` | the body's dent bones and the bones they read, found once by name; each region's last solve and the bones it read | a mutex to find or add a body; a body is updated on one thread |
 | `g_tunes` (2) | none | what the tuning files say | two copies: a reload fills the one not in use, then switches (`g_tuneNow`, release / acquire); one reload at a time (`g_tuneBusy`) |
 
 **Counters** are relaxed atomics. The log is a queue drained by its own thread, with the file kept open, so a worker
@@ -158,13 +161,47 @@ thread never waits on disk.
 **Other bodies.** They push through the shared table, capped at `fMaxPushOtherCm` (3 cm) × the body's scale. Dead
 bodies are kept up to `fDeadMaxAgeMs` old while they lie still.
 
+## Dents
+
+A body can ship a dent rig ([BODY_INTEGRATION.md](BODY_INTEGRATION.md)): dent bones in its skin, each riding on a
+bone of the body and carrying that bone's skin weight in its region (a breast, a glute, a thigh), and `DentRig.bin`
+with each region's skin samples, its dent bones and the arm, hand and leg shapes. `src\dents_core.h` holds the
+file's reader and the solve, with no game types; `tools\dent_model.py` is the same solve as the design model.
+
+**Per body.** `Dents` runs at the end of `Collide`, on a body whose dent bones and the bones they read were all found
+by name under `COM` (in any case; looked for again every 2 s until they are, and checked by name pointer on every
+update). The soft bones' world positions are where this frame's springs and pushes put them, and a bone that hangs
+on a soft bone (a nipple) moves with it. Up to 64 bodies with a dent rig are kept; an entry unused for 2 s is reused.
+
+**Per region, each update:**
+1. The skin samples are placed: each sample's rest position with the sliders' changes, skinned by its bones; its
+   normal turned by its strongest bone.
+2. The arm, hand and leg shapes the region uses (capsules between bone origins; a fingertip as a tip along the last
+   joint's line) are tested only when one comes near the region's bounds.
+3. A sample inside a shape needs the inward move along its normal that takes it out (bisection, up to the rig's
+   largest need).
+4. The wanted dent is the largest need x a smooth bump of the distance to each contact, out to the rig's fall-off,
+   smoothed over the samples' neighbours with each contact kept at its need.
+5. Only the dent bones under the wanted dent and one ring of their neighbours move. Their inward moves are the least
+   squares fit to the wanted dent, with a smoothing term over the bones' lattice, each between 0 and its largest
+   move (projected Gauss-Seidel, until no move changes by 0.1 µm). Then a sample dented past its want by over 2 mm
+   weighs x4 and a contact short by over 1 mm x2, for up to 4 rounds.
+6. A dent bone's local translation is its rest plus its move along its inward line, written to the node and the
+   rig's copy like the other bones.
+
+**Over time.** A dent follows its solve within `[Dents] fRelaxTime` (a share of 1 - exp(-dt / fRelaxTime) per
+frame), its depth x `[Dents] fScale`. A region none of whose bones moved more than 0.3 mm since its last solve, at
+the same sliders, keeps that solve, so a still pose costs no solve. A dent bone whose dent has ended is written back
+to its rest once. On A-Body's rigs `dent_test` measures about 70 µs per region solve, and about 150 µs per
+solve with a contact.
+
 ## Build variants
 
 | Define | `kDiag` | `kCollisions` | What's in it |
 |---|---|---|---|
-| none (`build.bat`) | true | true | everything: log, statistics, samples, collisions, world collision |
+| none (`build.bat`) | true | true | everything: log, statistics, samples, collisions, dents, world collision |
 | `TFP_RELEASE` | false | false | gravity, springs, body shape |
-| `TFP_RELEASE` + `TFP_RELEASE_COLLISIONS` | false | true | the above + collisions between bodies (A-Body 1.5) |
+| `TFP_RELEASE` + `TFP_RELEASE_COLLISIONS` | false | true | the above + the collisions, also between bodies, and the dents (the build A-Body 1.5 ships) |
 
 The release builds also force the world collision and the snapshots off, whatever the INI says. The tuning files work
 in every build.
@@ -175,6 +212,8 @@ in every build.
 - calls per site and the plugin's own time (ms per second of play, µs per update), split by part;
 - springs held, gravity applied, body-shape scaling;
 - collisions: bodies checked, pushes, contacts by pair with the deepest, other bodies and the shared table;
+- dents: body updates with a dent rig and their cost, how many were dented, the deepest dent and dent bone move,
+  regions solved and regions kept as they were;
 - one gravity sample;
 - the world-collision lines.
 

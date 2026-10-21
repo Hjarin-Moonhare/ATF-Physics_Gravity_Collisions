@@ -300,7 +300,7 @@ int main(int argc, char** argv) {
         snprintf(d, sizeof(d), "version %u, address bits 0x%X, layout bits 0x%X, list {0x%08X, 0x%X}", v.pluginVersion,
                  v.addressIndependence, v.structureIndependence, v.compatibleVersions[0], v.compatibleVersions[1]);
         Report("SFSE: loads on any game with its database", d,
-               v.dataVersion == 1 && v.pluginVersion == 25 && addressFree && layoutFree && needsDb && !v.reservedBreaking &&
+               v.dataVersion == 1 && v.pluginVersion == 26 && addressFree && layoutFree && needsDb && !v.reservedBreaking &&
                    v.compatibleVersions[0] == kRuntime_1_16_244 && !v.compatibleVersions[1] && !strcmp(v.name, "TF Physics"));
         char p1[MAX_PATH], p2[MAX_PATH];
         AddressLibraryPath(kRuntime_1_16_244, p1, sizeof(p1));

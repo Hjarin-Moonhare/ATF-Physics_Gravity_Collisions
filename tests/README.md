@@ -7,7 +7,7 @@ under Git Bash `find` is the Unix one.
 
 | Script | Builds and runs | Output in | Time |
 |---|---|---|---|
-| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `tune_dump` (on `config\TFPhysics.ini`), `addrlib_test` | `build\tests` | about 30 s |
+| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `tune_dump` (on `config\TFPhysics.ini`), `dent_test`, `addrlib_test` | `build\tests` | about 30 s |
 | `run_stress.bat` | `stress_test`, as the logging build | `build\tests` | about 15 s |
 | `run_stress_release_collisions.bat` | `stress_test`, as the release with collisions | `build\tests_relcol` | about 15 s |
 | `run_ini_check_release_collisions.bat` | `ini_check_release_collisions`, on both release INIs | `build\ini_check` | about 5 s |
@@ -27,7 +27,7 @@ the main README).
 
 ## collide_test.cpp
 
-Collisions, on A-Body's skeleton in the ten poses in `cases\`. In each pose, every soft bone's push must match the
+Collisions, on A-Body's skeleton in the 13 poses in `cases\`. In each pose, every soft bone's push must match the
 design's push in the file to 0.01 cm (0.3 cm when the wrist and finger bones are missing and the plugin falls back to
 the rest pose).
 
@@ -149,6 +149,25 @@ outfit [Spacesuit] form 00000000 slots 35 | Breasts 0.5000 Butt 0.6000 ...
 set there. A key that doesn't show its value was not read:
 a typo in its name, or a comment after its value.
 
+## dent_test.cpp
+
+The dents (`src\dents_core.h`) against their design model (`tools\dent_model.py`), on A-Body's two dent rigs in
+`data\`: `DentRig_A.bin` (50 dent bones in 6 regions: the breasts, glutes and thighs) and `DentRig_B.bin` (156 in
+the two breasts). Each case in `cases_dent\` is one rig in one of nine collision poses with the design's pushes, at
+the base sliders and with the breast, butt and thigh sliders at 0.5 (`_large`). Every dent bone's move must match
+the model's to 0.5 mm.
+
+- **The rig files:** each one read; four copies cut short (4 bytes, 200 bytes, half, all but the last byte) and one
+  with a wrong header turned away with a reason.
+- **A missing bone:** without a dent bone's parent (`C_Chest`), its region isn't dented.
+- **The depth setting:** x0 moves nothing, x2 stays within twice a dent bone's largest move.
+- **The time** of a region's solve, and of one with a contact.
+
+```
+load                               rig A: 50 dent bones in 6 regions, 2882 samples, 48 shapes  OK
+B_folded.txt                        121 skin samples in contact, deepest dent 1.01 cm, worst difference 0.000 mm  OK
+```
+
 ## addrlib_test.cpp
 
 - **SFSE's view of the plugin:** it loads on any game version that has its Address Library database (address bits
@@ -217,10 +236,11 @@ The two INIs differ only in `bodyShape`: 0 in Fixed, 1 in Variable. The world fe
 ## run_analyze.bat
 
 Runs MSVC `/analyze` with all warnings on the plugin, writes `build\analyze.txt` and prints the warning count. Nothing
-is built. The 30 it reports are known:
+is built. The 27 it reports are known:
 
 - 22 are C4865 in the Windows SDK's own headers (enum types under `/Wall`);
-- 6 are C5219, integers turned into floating point in the log's statistics and the sub-step count;
+- 3 are C5219, integers turned into floating point: the log's run time, the sub-step count and the thigh tilt's
+  average;
 - 2 are C4365, `int` to `size_t` in the child-list discovery's log.
 
 ## run_benchmarks.bat
@@ -237,3 +257,21 @@ Two measurements behind the plugin's memory rules:
 `tests\export_collision_cases.py` exported them from A-Body's skeleton (it needs A-Body's build tools). Each file holds
 every bone's local and world transform in a pose, plus the design's push per soft bone. `tools\README.md` has the
 format and how to make them again.
+
+## The dent cases in cases_dent\
+
+`tests\export_dent_cases.py` wrote them from nine of the collision poses (it needs A-Body's build tools and its dent
+rigs). Each file is one rig in one pose, in metres:
+
+```
+rig <A or B>
+scale <the body's scale>
+morph <slider> <weight>
+B <index> <bone> 1 <x axis: 3 numbers> <y axis> <z axis> <position x y z> <scale>
+D <region> <count> <each dent bone's move along its inward line>
+```
+
+- `morph`: one line per slider that isn't at 0 (none at the base sliders).
+- `B`: one line per rig bone, its world transform as the game stores it; `B <index> <bone> 0` when the pose has no
+  such bone.
+- `D`: one line per region, the moves the design model gives.
