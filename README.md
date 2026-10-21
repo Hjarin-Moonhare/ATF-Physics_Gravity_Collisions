@@ -25,6 +25,7 @@ match, it patches nothing and says why in its log.
   down), from the INI or the tuning files. The installed level's largest levels are settings.
 - Spring gravity in all 8 parts, and gravity shapes for the butt, belly, thighs, hips, calves, arms and torso, sized
   by the settle each part's skin takes cleanly.
+- A paused game (photo mode) shows every soft part at its rest point for the pose.
 - Collisions:
   - upper arms, forearms, hands and thighs push the breasts;
   - forearms, hands and thighs push the belly;

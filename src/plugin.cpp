@@ -109,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 22, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 23, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -364,6 +364,7 @@ struct Settings {
     // 2 = this update's, 3 = the next update's (predicted)
     int steerTime = 1;
     bool tuneReload = true;       // [Tuning] bReload: the tuning files read again when they change
+    bool settlePaused = true;     // [Springs] bSettleWhenPaused: a paused game shows each soft part at rest
     bool collision = true;        // hands, arms, thighs and the other breast push the soft bones
     bool measureOnly = false;     // find and log contacts (and position snapshots) but push nothing
     bool innerThighs = false;     // the inner-thigh group (in game it only met legs standing close together)
@@ -458,6 +459,7 @@ static void ReadSettings() {   // from g_iniPath
     const UINT steerTime = GetPrivateProfileIntA("World", "iSteerTime", 1, g_iniPath);
     g_cfg.steerTime = steerTime <= 3 ? static_cast<int>(steerTime) : 1;
     g_cfg.tuneReload = GetPrivateProfileIntA("Tuning", "bReload", 1, g_iniPath) != 0;
+    g_cfg.settlePaused = GetPrivateProfileIntA("Springs", "bSettleWhenPaused", 1, g_iniPath) != 0;
     g_cfg.collision = GetPrivateProfileIntA("Collision", "bEnabled", 1, g_iniPath) != 0;
     auto readC = [](const char* key, float def) {
         char b[64];
@@ -885,6 +887,8 @@ static std::atomic<std::uint64_t> g_lifeReads{0};                       // life 
 static std::atomic<std::uint64_t> g_searches[2], g_searchTicks[2];      // bone searches, COM searches   // the plugin's own time around the game's update
 static std::atomic<std::uint64_t> g_shapeScaled{0}, g_shapeHeld{0}, g_shapeBodies{0};   // (ScaleJiggle)
 static std::atomic<std::uint32_t> g_shapeMaxMm{0};
+static std::atomic<std::uint64_t> g_pausedBodies{0}, g_skippedFrames{0};
+static std::atomic<std::uint32_t> g_pausedMaxMm{0}, g_skippedDtBits{0};
 // per pair kind: soft group x (collider kind, or kNumColliders = the other side's soft bones): contacts and deepest
 static std::atomic<std::uint32_t> g_pairHits[kNumGroups][kNumColliders + 1], g_pairMaxMm[kNumGroups][kNumColliders + 1];
 static void CountPair(int group, int kind, float depth) {
@@ -1064,6 +1068,16 @@ static void MaybeLog() {
             "release's largest travel), largest swing added %.1f cm", static_cast<unsigned long long>(g_shapeBodies.exchange(0)),
             static_cast<unsigned long long>(g_shapeScaled.exchange(0)), static_cast<unsigned long long>(g_shapeHeld.exchange(0)),
             g_shapeMaxMm.exchange(0) / 10.0);
+    {   // paused frames (photo mode) and frames whose time the springs can't take
+        const unsigned long long pb = g_pausedBodies.exchange(0), sf = g_skippedFrames.exchange(0);
+        if (pb || sf) {
+            float skipDt;
+            const std::uint32_t bits = g_skippedDtBits.load();
+            std::memcpy(&skipDt, &bits, 4);
+            Log("   paused: %llu body updates with every soft bone at its rest point for the pose (largest move %.1f cm); "
+                "%llu skipped with a frame time out of range (last %.3f s)", pb, g_pausedMaxMm.exchange(0) / 10.0, sf, skipDt);
+        }
+    }
     if (g_cfg.collision) {
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
@@ -1441,6 +1455,7 @@ struct ActorView {
     bool effDone[128] = {};
     float settle[128][3];           // each spring's gravity shape this frame (COM axes, m): PreUpdate, AddSettle
     bool settleOn = false;          // ... some part of this body has its gravity shape on
+    bool paused = false;            // the game is paused this frame (settle[] holds each spring's rest point)
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -2257,7 +2272,23 @@ static float BreastSag(const ActorView& v) {
 
 static void PreUpdate(ActorView& v) {
     const float dt = *reinterpret_cast<const float*>(g_addr[kFrameTime]);
-    if (!(dt > 0.0f && dt < 0.25f) || !v.com) return;
+    // a zero frame time is the game paused (photo mode): its springs hold their last bounce and nothing is
+    // stepped or written here; with [Springs] bSettleWhenPaused each spring's rest point for the pose is worked out
+    // instead (the larger of its own steady sag and its part's gravity shape) and put on in PostUpdate (PausedSettle)
+    const bool paused = dt == 0.0f && g_cfg.settlePaused;
+    if (!(dt > 0.0f && dt < 0.25f) && !paused) {
+        if constexpr (kDiag) {
+            if (dt != 0.0f) {
+                g_skippedFrames.fetch_add(1, std::memory_order_relaxed);
+                std::uint32_t bits;
+                std::memcpy(&bits, &dt, 4);
+                g_skippedDtBits.store(bits, std::memory_order_relaxed);
+            }
+        }
+        return;
+    }
+    if (!v.com) return;
+    v.paused = paused;
     const TuneSettings& T = Tune();
     const bool tuning = T.springs || T.scaled || T.damping;
     // gravity relative to standing, per 1 g, in COM's frame (its world rows are its axes): g_now - g_standing
@@ -2297,6 +2328,31 @@ static void PreUpdate(ActorView& v) {
         // a record once tuned (its springs or its damping) stays in this path, so taking the tuning out
         // puts everything back: untuned, the values below are bit for bit the installed ones
         const bool touched = part >= 0 && info->touched.load(std::memory_order_relaxed);
+        if (paused) {   // the rest point, per COM axis (springs, records and damping as they are)
+            if (part < 0) continue;
+            if (v.shapeOn || v.tuned || tuning || touched) {
+                if (!v.ceilReady) PartCeilings(v);
+                AxisJiggleOf(v, *info, e, T, j);
+            }
+            const float G = pull[part], shape = part > 0 ? shapeLevel[part] : 0.0f;
+            const float r3[3] = {rel.x, rel.y, rel.z};
+            for (int k = 0; k < 3; ++k) {
+                float seen = 0.0f;   // the spring's own steady sag, held at 85% of its 60 fps travel, as its swing shows it
+                if (G > 0.0f && j[k] >= 0.05f && e.strength[k] > 0.0f) {
+                    const float most = 0.85f * e.travel[k] / 60.0f;
+                    const float off = std::fabs(r3[k]) * G / (j[k] * e.strength[k]);
+                    seen = (off < most ? off : most) * j[k];
+                }
+                float want = 0.0f;   // the part's gravity shape
+                if (shape > 0.0f) {
+                    const float r = r3[k] > 1.0f ? 1.0f : (r3[k] < -1.0f ? -1.0f : r3[k]);
+                    want = std::fabs(shape * kPartSettleLimit[part] * 0.85f * info->maxTravel[k] / 60.0f * r);
+                }
+                const float at = want > seen ? want : seen;
+                v.settle[i][k] = r3[k] < 0.0f ? -at : at;
+            }
+            continue;
+        }
         if (part >= 0 && (T.springs || T.damping) && !touched) info->touched.store(true, std::memory_order_relaxed);
         if (part >= 0 && (v.shapeOn || v.tuned || tuning || touched)) {
             if (!v.ceilReady) PartCeilings(v);
@@ -2432,6 +2488,77 @@ static float ThighTiltDeg(ActorView& v) {
 // so nothing added here feeds back into them.  Runs before the gravity shapes and collisions, so collisions see the
 // scaled swing.  A neutral body (every part x1) skips this: whatever a bone kept from before is a swing of a spring at
 // rest (it stops writing only below 0.5 mm), x the old factor, and goes with its next write.
+// a paused frame (photo mode): every soft bone at its rest point for the pose (PreUpdate's settle[], in COM's
+// axes) in place of the bounce its spring holds.  The bone's offset on top is that point (in the bone's parent frame)
+// minus the spring's own offset, read the way ScaleJiggle reads it; a bone further out than its travel allows is left
+// as it is, and every bone gets its offset, a zero one too, so last frame's comes off
+static void PausedSettle(ActorView& v) {
+    struct Item { void* target; void* parent; void* driver; const float* rest; const float* at; float local[3]; float most; };
+    Item items[128];
+    int n = 0;
+    void* taken[128];
+    int nTaken = 0;
+    const TuneSettings& T = Tune();
+    for (int i = 0; i < v.nSprings && n < 128; ++i) {
+        void* inst = v.springs[i];
+        void* target = At<void*>(inst, 0x18);
+        const SpringInfo* info = InfoOf(v, i);
+        if (!info || info->part < 0 || !target) continue;
+        bool twice = false;   // two springs on one bone: the first one's
+        for (int q = 0; q < nTaken && !twice; ++q) twice = taken[q] == target;
+        if (twice) continue;
+        taken[nTaken++] = target;
+        Item& it = items[n];
+        it.target = target;
+        it.parent = At<void*>(target, 0x38);
+        it.driver = At<void*>(inst, 0x10);
+        if (!it.parent || !it.driver) continue;
+        it.rest = &At<float>(inst, 0x60);
+        it.at = v.settle[i];
+        std::memcpy(it.local, static_cast<char*>(target) + 0x70, 12);
+        const float* o = EffOf(v, i, T).travel;
+        it.most = 1.5f * std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) / 60.0f + 0.001f;
+        ++n;
+    }
+    {   // the spring's own offset: without ours from last frame where the node still holds it (one lock for all)
+        BoneLock lock;
+        for (int q = 0; q < n; ++q)
+            if (const BoneState* st = FindState(items[q].target, false))
+                if (std::memcmp(st->written, items[q].local, 12) == 0)
+                    for (int k = 0; k < 3; ++k) items[q].local[k] = st->written[k] - st->added[k];
+    }
+    std::uint32_t maxMm = 0;
+    const bool fresh = v.nAdd == 0;
+    for (int q = 0; q < n; ++q) {
+        const Item& it = items[q];
+        float d[3], add[3] = {0, 0, 0};
+        for (int k = 0; k < 3; ++k) d[k] = it.local[k] - it.rest[k];
+        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= it.most * it.most) {
+            Vec3 w = {0, 0, 0};   // rows of a world rotation are the node's axes in the world
+            for (int k = 0; k < 3; ++k) w = Add(w, Scale(Row(it.driver, 0x80, k), it.at[k]));
+            for (int r = 0; r < 3; ++r) add[r] = Dot(w, Row(it.parent, 0x80, r)) - d[r];
+        }
+        const float len = std::sqrt(add[0] * add[0] + add[1] * add[1] + add[2] * add[2]);
+        if (len < 2e-5f) add[0] = add[1] = add[2] = 0;
+        if (fresh && v.nAdd < ActorView::kMaxAdds) {
+            v.addNode[v.nAdd] = it.target;
+            std::memcpy(v.add[v.nAdd], add, 12);
+            ++v.nAdd;
+        } else {
+            v.AddTo(it.target, add);
+        }
+        const std::uint32_t mm = static_cast<std::uint32_t>(len * 1000);
+        maxMm = mm > maxMm ? mm : maxMm;
+    }
+    if constexpr (kDiag) {
+        g_pausedBodies.fetch_add(1, std::memory_order_relaxed);
+        std::uint32_t prev = g_pausedMaxMm.load(std::memory_order_relaxed);
+        while (maxMm > prev && !g_pausedMaxMm.compare_exchange_weak(prev, maxMm)) {}
+    } else {
+        (void)maxMm;
+    }
+}
+
 static void ScaleJiggle(ActorView& v) {
     struct Item { void* target; void* inst; void* parent; float j[3]; float local[3]; float most; bool held; };
     Item items[128];
@@ -2537,8 +2664,10 @@ static bool Neutral(const ActorView& v) {   // and nothing tuned on every body's
 }
 
 static void PostUpdate(ActorView& v, int site) {
-    // first: the shapes and collisions below build on the scaled swing (a tuned body's too)
-    if ((v.shapeOn || v.tuned || Tune().scaled) && !Neutral(v)) ScaleJiggle(v);
+    // first: the shapes and collisions below build on the scaled swing (a tuned body's too); a paused frame
+    // puts every soft bone at its rest point instead
+    if (v.paused) PausedSettle(v);
+    else if ((v.shapeOn || v.tuned || Tune().scaled) && !Neutral(v)) ScaleJiggle(v);
     Anchor* anchors = v.anchors;
     const float level = v.level;
     if (kDiag && g_cfg.enabled) g_gravityActors.fetch_add(1, std::memory_order_relaxed);
@@ -2632,7 +2761,7 @@ static void PostUpdate(ActorView& v, int site) {
             }
         }
     }
-    if (v.settleOn) AddSettle(v);   // the other parts' gravity shapes, on top like the breasts'
+    if (v.settleOn && !v.paused) AddSettle(v);   // the other parts' gravity shapes, on top like the breasts'
     if (kCollisions && g_cfg.collision) {
         v.site = site;
         LARGE_INTEGER t0, t1;
@@ -4689,9 +4818,9 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         (sfse->runtimeVersion >> 16) & 0xFF, (sfse->runtimeVersion >> 4) & 0xFFF, sfse->runtimeVersion);
     Log("lying also needs the thighs flat: %.0f-%.0f deg from vertical", g_cfg.thighFlatStartDeg, g_cfg.thighFlatFullDeg);
     Log("settings from %s: enabled %d, hang %.2f cm, press %.2f cm, dead zone %.0f deg, lying %.0f-%.0f deg hip tilt, "
-        "slump %.2f, fixed frame rate %d, spring gravity %.3f g",
+        "slump %.2f, fixed frame rate %d, spring gravity %.3f g, a paused game's soft parts at rest %d",
         g_iniPath, g_cfg.enabled, g_cfg.hangCm, g_cfg.pressCm, g_cfg.deadZoneDeg, g_cfg.lyingStartDeg, g_cfg.lyingFullDeg,
-        g_cfg.slump, g_cfg.fixedFrameRate, g_cfg.springGravity);
+        g_cfg.slump, g_cfg.fixedFrameRate, g_cfg.springGravity, g_cfg.settlePaused);
     char gravityLevel[96] = "as installed";
     if (g_cfg.gravityLevel > 0.0f)
         snprintf(gravityLevel, sizeof(gravityLevel), "x%.2f for every body (its own largest level; smaller or thinner "

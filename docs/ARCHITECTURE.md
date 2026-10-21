@@ -60,13 +60,15 @@ reset (slot 2) when it isn't. Three call sites call that loop:
    - each spring's MaxDist is set so its cap is the 60 fps size;
    - gravity goes into each spring's velocity (the part's `[Springs]` key, or its `fSag`), and each spring's share of
      its part's gravity shape is worked out;
-   - damping follows the body shape and the tuning.
+   - damping follows the body shape and the tuning;
+   - a zero frame time (the game paused) steps nothing: each spring's rest point for the pose is worked out instead.
 4. **The game's own loop.** The springs and correctives run.
 5. `PostUpdate`:
    - the breast anchors follow the chest's world tilt, with the dead zone, lying, side and face-down detection, the
      thigh check and the per-bone shapes on top of the springs. Each shape takes its level: one set for every body
      or for the shape is its own largest, and the installed one is held at `[Gravity] fMaxBack` .. `fMaxDown`;
-   - `ScaleJiggle` scales each spring's swing by the body shape and the tuning;
+   - `ScaleJiggle` scales each spring's swing by the body shape and the tuning; on a paused frame `PausedSettle` puts
+     every soft bone at its rest point instead;
    - `AddSettle` puts the other parts' gravity shapes on their bones;
    - `Collide` pushes the soft bones;
    - `AddOnTopAll` writes the per-bone results;

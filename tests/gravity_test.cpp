@@ -630,6 +630,8 @@ int main() {
                   !strcmp(got, "0") && g_cfg.gravityLevel == 0.0f;   // the installed level
         keysFile &= GetPrivateProfileStringA("Gravity", "fGravityShape", "missing", got, sizeof(got), g_iniPath) &&
                   !strcmp(got, "0") && g_cfg.gravityShape == 0.0f;   // off
+        keysFile &= GetPrivateProfileStringA("Springs", "bSettleWhenPaused", "missing", got, sizeof(got), g_iniPath) &&
+                  !strcmp(got, "1") && g_cfg.settlePaused;
         keysFile &= g_cfg.springGravityHips == 0.0f && g_cfg.springGravityCalves == 0.0f && g_cfg.springGravityArms == 0.0f &&
                   g_cfg.springGravityTorso == 0.0f;   // read from the file
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&

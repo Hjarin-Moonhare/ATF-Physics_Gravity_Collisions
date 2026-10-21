@@ -9,6 +9,9 @@ Releases are the builds A-Body ships.
   A level's swing no longer moves the damping.
 - **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
 - **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
+- **A paused game (photo mode):** a zero frame time steps nothing. With `[Springs] bSettleWhenPaused` (on unless set
+  to 0) every soft bone sits at its rest point for the pose, the larger of its spring's steady sag and its part's
+  gravity shape, in place of the bounce its spring holds; the breast gravity shapes and the collisions go on top.
 - **Gravity shapes for the other parts:** lying down or on all fours, the soft bones of the butt, belly, thighs, hips,
   calves, upper arms and torso settle toward the floor past what their springs allow, up to the settle each part's
   skin takes cleanly (`kPartSettleLimit`), x `[Gravity] fGravityShape` or a part's `fGravityShape` (0 to 2; off unless

@@ -173,3 +173,10 @@ the code does instead.
 - Fix: per spring and COM axis, the shape is the rest of the way from the spring's steady sag, as its swing shows it,
   to the part's settle limit. A bone of a part with its shape on gets an offset every frame, a zero one too, so last
   frame's comes off when the body stands up.
+
+**28. A paused frame steps nothing.**
+- Breaks: with no time passing the game's springs hold their last bounce, so a pose changed while paused shows a
+  frozen bounce, and anything stepped by the frame time stands still or divides by zero.
+- Fix: a zero frame time writes no spring, record, damping or velocity. Each soft bone is put at its rest point for
+  the pose, from values that need no time, in place of the held bounce; the springs go on from their own state when
+  the game runs again.

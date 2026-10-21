@@ -277,6 +277,38 @@ int main() {
     snprintf(d, sizeof(d), "TF_Breast_Outer_L at %.2f %.2f %.2f cm (moved by the side shape and pushes)", lower[0] * 100,
              lower[1] * 100, lower[2] * 100);
     Report("bodies did move", true, d);
+    {   // paused frames (a zero frame time) on many threads: no deadlock, each bone at one place (not stacked)
+        dt = 0.0f;
+        stop = false;
+        std::atomic<long long> pausedFrames{0};
+        std::vector<std::thread> paused;
+        for (int t = 0; t < kThreads; ++t)
+            paused.emplace_back([&, t] {
+                long long n = 0;
+                for (int i = t; !stop.load(std::memory_order_relaxed); i += kThreads, ++n) Frame(*bodies[i % kBodies], i % 3);
+                pausedFrames += n;
+            });
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        stop = true;
+        for (auto& th : paused) th.join();
+        std::map<std::string, std::vector<float>> at;
+        bool finite = true;
+        for (auto& [n, p] : bodies[0]->node) {
+            const float* a = reinterpret_cast<const float*>(p + 0x70);
+            at[n] = {a[0], a[1], a[2]};
+            for (int k = 0; k < 3; ++k) finite &= std::isfinite(a[k]);
+        }
+        Frame(*bodies[0], 2);
+        double moved = 0;
+        for (auto& [n, p] : bodies[0]->node) {
+            const float* a = reinterpret_cast<const float*>(p + 0x70);
+            for (int k = 0; k < 3; ++k) moved = std::fmax(moved, std::fabs(a[k] - at[n][k]) * 100);
+        }
+        snprintf(d, sizeof(d), "%lld paused body-updates in 2 s on %d threads; finite %s; one more moves %.6f cm",
+                 pausedFrames.load(), kThreads, finite ? "yes" : "NO", moved);
+        Report("paused frames, threads", pausedFrames.load() > 1000 && finite && moved < 1e-5, d);
+        dt = 1.0f / 60;
+    }
     {   // a calf (no collisions reach it) stands off its spring's value by the body's jiggle: the swing x j - 1
         char* calf = bodies[0]->node["TF_Calf_Medial_L"];
         const void* inst = nullptr;

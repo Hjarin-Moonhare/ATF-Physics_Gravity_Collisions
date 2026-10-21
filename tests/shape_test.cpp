@@ -914,6 +914,71 @@ int main() {
             g_cfg = keep;
             SetRows(com9, upright);
         }
+        {   // a paused frame (photo mode: a zero frame time): every soft bone at its rest point for the pose
+            const Vec3 onBack[3] = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
+            const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            const float stiff[3] = {1000, 1000, 1000};
+            const float glute[3] = {1.68f, 1.02f, 3.75f};   // TF_Glute_Lower's Max + Max travel
+            const PresetSpring& gp = kPresetBones[bone("TF_Glute_Lower_L")].s[0][0];
+            const Settings keep = g_cfg;
+            const float keepDt = dt9;
+            auto run = [&](const Vec3 rows[3], const float frozen[3], bool* pausedOut, float* added) {
+                SetRows(com9, rows);
+                Spring g = NewSpring(com9, pecs9, "TF_Glute_Lower_L", gp.maxDist, stiff, gp.damping, zero);
+                memcpy(g.target + 0x70, frozen, 12);   // the bounce its spring holds (its rest is zero)
+                ActorView v;
+                v.com = com9;
+                v.springs[v.nSprings++] = g.inst;
+                PreUpdate(v);
+                *pausedOut = v.paused;
+                if (v.paused) PausedSettle(v);
+                const float* a = v.AddFor(g.target);
+                for (int k = 0; k < 3; ++k) added[k] = a ? a[k] : -9.0f;
+                const float* vel = reinterpret_cast<const float*>(g.inst + 0xB0);   // nothing stepped
+                return vel[0] == 0.0f && vel[1] == 0.0f && vel[2] == 0.0f &&
+                       reinterpret_cast<const float*>(g.data + 0x20)[0] == 1000.0f;
+            };
+            dt9 = 0.0f;
+            const float bounce[3] = {0.01f, -0.004f, 0.006f};
+            bool paused = false;
+            float a[3];
+            const bool still = run(upright, bounce, &paused, a);
+            bool ok = paused && still && std::fabs(a[0] + 0.01f) < 1e-7f && std::fabs(a[1] - 0.004f) < 1e-7f &&
+                      std::fabs(a[2] + 0.006f) < 1e-7f;
+            snprintf(d, sizeof(d), "standing, a 1 cm bounce held: put back %.2f / %.2f / %.2f cm, its spring left as it was: %s",
+                     a[0] * 100, a[1] * 100, a[2] * 100, still ? "yes" : "NO");
+            Report("paused: the bounce dropped", d, ok);
+            g_cfg.springGravityButt = 0.04f;   // lying on the back: the spring's own steady sag, 9.81 x 0.04 / 1000 m an axis
+            g_cfg.gravityShape = 0.0f;
+            run(onBack, zero, &paused, a);
+            const float sag = 9.81f * 0.04f / 1000.0f;
+            // its rest point (0, -sag, +sag) in COM's axes is (0, -sag, -sag) in the world, and in the upright parent
+            ok = paused && std::fabs(a[0]) < 1e-7f && std::fabs(a[1] + sag) < 1e-7f && std::fabs(a[2] + sag) < 1e-7f;
+            snprintf(d, sizeof(d), "lying on the back: (%.3f, %.3f, %.3f) mm, want (0, %.3f, %.3f)", a[0] * 1000, a[1] * 1000,
+                     a[2] * 1000, -sag * 1000, -sag * 1000);
+            Report("... the springs' own sag", d, ok);
+            g_cfg.gravityShape = 1.0f;   // the butt's gravity shape is past that sag on both axes
+            run(onBack, zero, &paused, a);
+            const float w1 = kPartSettleLimit[kPartButt] * 0.85f * glute[1] / 60.0f;
+            const float w2 = kPartSettleLimit[kPartButt] * 0.85f * glute[2] / 60.0f;
+            ok = paused && std::fabs(a[1] + w2) < 1e-7f && std::fabs(a[2] + w1) < 1e-7f;
+            snprintf(d, sizeof(d), "and its gravity shape: %.2f / %.2f cm (want %.2f / %.2f)", a[1] * 100, a[2] * 100, -w2 * 100,
+                     -w1 * 100);
+            Report("... the butt's gravity shape", d, ok);
+            g_cfg.settlePaused = false;
+            run(onBack, bounce, &paused, a);
+            const bool off = !paused && a[0] == -9.0f;
+            g_cfg.settlePaused = true;
+            dt9 = 0.3f;   // a frame too long for the springs: skipped, not paused
+            run(onBack, bounce, &paused, a);
+            const bool longFrame = !paused && a[0] == -9.0f;
+            snprintf(d, sizeof(d), "bSettleWhenPaused=0: left alone %s; a 0.3 s frame: skipped %s", off ? "yes" : "NO",
+                     longFrame ? "yes" : "NO");
+            Report("... and the cases it leaves", d, off && longFrame);
+            g_cfg = keep;
+            dt9 = keepDt;
+            SetRows(com9, upright);
+        }
         {   // per character, per outfit and per planet (the reads on a fake character and record)
             g_formIdOk = g_wornOk = g_gravityScaleOk = true;
             auto person = [&](bool player, std::uint32_t ref, std::uint32_t base) {

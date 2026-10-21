@@ -105,6 +105,9 @@ Body-shape physics, against numbers worked out from the design, not from the plu
 - **Gravity shapes of the other parts,** lying on the back: the settle on the hips with no spring sag (in COM's axes and
   on the bone), topping up a spring's own sag, none past it (a zero offset handed on), a tuning file's level, a thin
   and a heavy body, upside down held at 1 g, standing, `[Gravity] bEnabled=0`, and the breasts left to their own.
+- **A paused frame** (a zero frame time): standing, a held bounce put back to rest with the spring left as it was;
+  lying on the back, the spring's own sag and the butt's gravity shape over it; `bSettleWhenPaused=0` and a 0.3 s
+  frame left alone.
 - **The stretch guard:** the strain per body, the shape ceilings scaled by it, and the breast springs' gravity held.
 - **Settings:** the shipped INI's `[BodyShape]` keys, and garbage `[BodyShape]` values (NaN taken as the low end).
 - **Tuning each part,** written out from the design ([../docs/TUNING.md](../docs/TUNING.md)):
@@ -174,6 +177,7 @@ The plugin's whole per-frame path on many fake bodies:
 
 - **Cost per body-update, one thread:** bodies 3 m apart (about 5 µs) and 24 bodies in one spot (about 20 µs).
 - **11 threads for 4 s:** no deadlock, and 0 Windows memory checks in every update.
+- **Paused frames on 11 threads for 2 s:** no deadlock, every offset finite, and one more paused frame moves nothing.
 - **The same input gives the same result:** identical bodies end identical (to 0.000001 cm), and one more frame moves
   nothing. The bodies did move, and the body shape scaled their swings.
 - **Other bodies:** 24 in one spot (measured only), then pushing from many threads, with every offset finite and the

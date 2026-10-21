@@ -216,3 +216,13 @@ passes through itself, one part at a time, on all fours, on the back and on a si
 | Torso | 2.25 | the waist and back |
 
 At these limits the skin itself moves up to about 2 to 4 cm.
+
+## A paused game (TFPhysics.ini)
+
+| Key | Default | What it does |
+|---|---|---|
+| `[Springs] bSettleWhenPaused` | 1 | while the game is paused (a zero frame time, as in photo mode), every soft bone sits at its rest point for the pose; 0 = the bounce its spring holds |
+
+A spring's rest point, per COM axis, is the larger of its own steady sag (held at 85% of its 60 fps travel, as its
+swing shows it) and its part's gravity shape. Nothing is stepped on a paused frame: no spring, record, damping or
+velocity is written, so the springs go on from their own state when the game runs again.
