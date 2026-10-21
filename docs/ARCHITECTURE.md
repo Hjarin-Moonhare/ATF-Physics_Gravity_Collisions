@@ -138,6 +138,12 @@ thread never waits on disk.
 **Rules.**
 - A contact pushes only past the pair's natural-pose distance, so nothing moves at rest.
 - Pushes are capped per group (breast 5 cm, belly 3, inner thigh 3, glute 2.5).
+- A part's pushes are coupled (`CouplePushes`, `[Collision] bCouplePushes`): no two of its bones' pushes differ by
+  more than the part's spread (`kGroupPushSpread`: breast 2 cm, belly 4, inner thigh 5, glute 3.5). A bone with no
+  contact of its own follows the pushed ones. Of two pushed bones, the one the move carries further along its own push
+  follows the other; in a squeeze (the move would carry both, or take both back against their pushes) they give way
+  evenly. Four passes over the part's pairs, then the group's cap again. The belly's, inner thighs' and glutes'
+  spreads are wider than their caps, so there it only acts in a squeeze.
 - Breast against breast uses the positions without the plugin's gravity offsets: lying on a side moves one breast
   toward the other on purpose.
 

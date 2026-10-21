@@ -43,6 +43,10 @@ the rest pose).
 - **The game's layout with no Windows checks:** learning it, the bone search and the collisions make 0 memory checks.
 - **Collisions against the gravity shapes** at x2, in each shape with the arms at rest, at the sides and hanging.
   These lines print the pushes and have no `OK`.
+- **A part pushed as one** (`CouplePushes`, on a breast's four bones): one bone pushed 5 cm keeps its push and the
+  other three follow to within the spread (2 cm); of two bones pushed the same way two spreads apart, the less
+  pushed one is carried along and the other keeps its push; in a squeeze both give way evenly; pushes within the
+  spread are left as they are; another part's push is left alone.
 - **Switches:** gravity off (the anchors stay, the collisions still push the full 5 cm), no child list anywhere
   (nothing pushed, tried again later), the glutes off.
 - **Other bodies:**

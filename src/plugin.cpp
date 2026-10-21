@@ -109,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 23, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 24, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -372,6 +372,7 @@ struct Settings {
     bool others = true;           // other bodies' shapes are shared and checked
     bool othersMeasureOnly = true;   // ... and their contacts only logged, not pushed (the first build measures)
     bool deadBodies = true;       // dead bodies take part (share their shapes, push and are pushed)
+    bool couplePushes = true;     // [Collision] bCouplePushes: the bones of one part push as one soft mass
     float deadMaxAge = 0.75f;     // ... a dead body lying still is used from a share up to this old (s)
     float maxPushOther = 0.03f;   // ... other bodies push a soft bone at most this far (m), inside its group's cap
     float softScale = 1.1f;       // size of the soft spheres, x the measured size
@@ -472,6 +473,7 @@ static void ReadSettings() {   // from g_iniPath
     g_cfg.others = GetPrivateProfileIntA("Collision", "bOtherActors", 1, g_iniPath) != 0;
     g_cfg.othersMeasureOnly = GetPrivateProfileIntA("Collision", "bOtherActorsMeasureOnly", 1, g_iniPath) != 0;
     g_cfg.deadBodies = GetPrivateProfileIntA("Collision", "bDeadBodies", 1, g_iniPath) != 0;
+    g_cfg.couplePushes = GetPrivateProfileIntA("Collision", "bCouplePushes", 1, g_iniPath) != 0;
     g_cfg.softScale = readC("fSoftScale", g_cfg.softScale);
     g_cfg.softScale = clampf(g_cfg.softScale, 0.5f, 1.5f);
     const char* pushKeys[kNumGroups] = {"fMaxPushBreastCm", "fMaxPushBellyCm", "fMaxPushThighCm", "fMaxPushGluteCm"};
@@ -4089,6 +4091,46 @@ static void WatchProxies(const ActorView& v, int site) {
         part[1], part[2], cell, cell ? ((cellFlags & 1) ? "interior" : "exterior") : "none", exterior);
 }
 
+// the soft bones of one part (a breast, the belly, a glute, an inner thigh) push as one soft mass: no two of
+// a part's pushes (world) differ by more than the part's spread (kGroupPushSpread: the furthest one bone moved alone
+// leaves the skin smooth, no hard crease and no sharp edge, tests\stretch_limit_push_smooth.py).  A bone with no contact
+// of its own follows the pushed ones.  Of two pushed bones, the one the move carries further along its own push follows
+// the other (its part carries it, away from what pushes it); when the move would carry both, or take both back against
+// their pushes (a squeeze), they give way evenly.  Every push stays inside its group's cap
+static void CouplePushes(Vec3 push[kNumSoft], const bool on[kNumSoft], const bool contact[kNumSoft], float size) {
+    for (int g = 0; g < kNumGroups; ++g)
+        for (int side = -1; side <= 1; ++side) {
+            int m[kNumSoft], n = 0;
+            for (int i = 0; i < kNumSoft; ++i)
+                if (on[i] && kSoft[i].group == g && kSoft[i].side == side) m[n++] = i;
+            if (n < 2) continue;
+            const float spread = kGroupPushSpread[g] * size;
+            for (int pass = 0; pass < 4; ++pass)
+                for (int a = 0; a < n; ++a)
+                    for (int b = a + 1; b < n; ++b) {
+                        const int i = m[a], j = m[b];
+                        const Vec3 d = Sub(push[i], push[j]);
+                        const float L = std::sqrt(Dot(d, d));
+                        if (L <= spread) continue;
+                        const Vec3 corr = Scale(d, (L - spread) / L);
+                        float wi = 0.5f;   // how much of the move is i's
+                        if (contact[i] != contact[j]) {
+                            wi = contact[i] ? 0.0f : 1.0f;
+                        } else if (contact[i]) {
+                            const bool carriesI = Dot(d, push[i]) <= 0.0f, carriesJ = Dot(d, push[j]) >= 0.0f;
+                            if (carriesI != carriesJ) wi = carriesI ? 1.0f : 0.0f;
+                        }
+                        push[i] = Sub(push[i], Scale(corr, wi));
+                        push[j] = Add(push[j], Scale(corr, 1.0f - wi));
+                    }
+            const float cap = g_cfg.maxPush[g] * size;
+            for (int a = 0; a < n; ++a) {
+                const float L = std::sqrt(Dot(push[m[a]], push[m[a]]));
+                if (L > cap) push[m[a]] = Scale(push[m[a]], cap / L);
+            }
+        }
+}
+
 static void Collide(ActorView& v) {
     if (g_layoutState.load() == 0)
         for (const Anchor& a : v.anchors)
@@ -4204,6 +4246,8 @@ static void Collide(ActorView& v) {
 
     static const char* kOtherShapeName[kNumOtherKinds] = {"upper arm", "forearm", "hand", "thigh", "chest", "pelvis", "calf",
                                                           "foot", "soft"};
+    Vec3 push[kNumSoft] = {};   // every bone's push (world) first, then the parts coupled, then put on
+    bool pushOn[kNumSoft] = {}, touched[kNumSoft] = {};
     for (int i = 0; i < kNumSoft; ++i) {
         if (!have[i]) continue;
         const SoftBoneDef& d = kSoft[i];
@@ -4305,6 +4349,15 @@ static void Collide(ActorView& v) {
             total = {total.x * cap / L, total.y * cap / L, total.z * cap / L};
             L = cap;
         }
+        push[i] = total;
+        pushOn[i] = true;
+        touched[i] = L >= 1e-4f;
+    }
+    if (g_cfg.couplePushes) CouplePushes(push, pushOn, touched, size);
+    for (int i = 0; i < kNumSoft; ++i) {
+        if (!pushOn[i]) continue;
+        const Vec3 total = push[i];
+        const float L = std::sqrt(Dot(total, total));
         // into the parent's frame; always handed on, so a push from last frame is taken off when it ends
         const float inv = 1.0f / parentXf[i].scale;
         const float local[3] = {Dot(parentXf[i].ax[0], total) * inv, Dot(parentXf[i].ax[1], total) * inv,
@@ -4837,9 +4890,11 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         kPartSettleLimit[kPartHip], kPartSettleLimit[kPartCalf], kPartSettleLimit[kPartArm], kPartSettleLimit[kPartTorso],
         g_cfg.sizeScaling, g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
     Log("collisions %d (measure only %d): soft size x%.2f, largest push breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, "
-        "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d)",
+        "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d); a part's bones push as one %d (no "
+        "two differ by more than: breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, glute %.1f cm)",
         g_cfg.collision, g_cfg.measureOnly, g_cfg.softScale, g_cfg.maxPush[0] * 100, g_cfg.maxPush[1] * 100, g_cfg.maxPush[2] * 100,
-        g_cfg.maxPush[3] * 100, g_cfg.innerThighs, g_cfg.glutes, g_cfg.others, g_cfg.othersMeasureOnly);
+        g_cfg.maxPush[3] * 100, g_cfg.innerThighs, g_cfg.glutes, g_cfg.others, g_cfg.othersMeasureOnly, g_cfg.couplePushes,
+        kGroupPushSpread[0] * 100, kGroupPushSpread[1] * 100, kGroupPushSpread[2] * 100, kGroupPushSpread[3] * 100);
     Log("other bodies push at most %.1f cm; dead bodies %d (a dead body lying still: its shapes used up to %.0f ms old)",
         g_cfg.maxPushOther * 100, g_cfg.deadBodies, g_cfg.deadMaxAge * 1000);
     Log("body shape %d: jiggle x(1 %+.2f thin %+.2f muscular %+.2f heavy), gravity x(1 %+.2f thin %+.2f muscular %+.2f "

@@ -180,3 +180,10 @@ the code does instead.
 - Fix: a zero frame time writes no spring, record, damping or velocity. Each soft bone is put at its rest point for
   the pose, from values that need no time, in place of the held bounce; the springs go on from their own state when
   the game runs again.
+
+**29. A part is pushed as one soft mass.**
+- Breaks: with each soft bone pushed on its own, an arm pressing one spot moves that bone up to its group's cap while
+  the bones next to it stay, and the skin between them folds into a sharp edge.
+- Fix: the pushes of a part's bones are coupled: no two differ by more than the furthest one bone moves alone with
+  the skin smooth (`kGroupPushSpread`). A bone with no contact of its own follows the pushed ones, a pushed bone is
+  carried along its own push by a bone pushed further, and only a squeeze takes pushes back, evenly.

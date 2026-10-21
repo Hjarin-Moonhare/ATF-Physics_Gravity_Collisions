@@ -9,6 +9,14 @@ Releases are the builds A-Body ships.
   A level's swing no longer moves the damping.
 - **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
 - **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
+- **A part pushed as one soft mass:** the collision pushes of the soft bones of a breast, the belly, a glute and an
+  inner thigh are coupled. No two of a part's pushes differ by more than the furthest one bone moves alone with the
+  skin smooth, no hard crease and no sharp edge (`kGroupPushSpread`: breast 2 cm, belly 4, inner thigh 5, glute 3.5).
+  A bone with no contact of its own follows the pushed ones. Of two pushed bones, the one the move carries further
+  along its own push follows the other; when the move would carry both, or take both back against their pushes (a
+  squeeze), they give way evenly. Every push stays inside its group's cap. The belly's, inner thighs' and glutes'
+  spreads are wider than their caps, so there it only acts in a squeeze. `[Collision] bCouplePushes` (on unless set
+  to 0).
 - **A paused game (photo mode):** a zero frame time steps nothing. With `[Springs] bSettleWhenPaused` (on unless set
   to 0) every soft bone sits at its rest point for the pose, the larger of its spring's steady sag and its part's
   gravity shape, in place of the bounce its spring holds; the breast gravity shapes and the collisions go on top.

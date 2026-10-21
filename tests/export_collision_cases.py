@@ -1,6 +1,7 @@
 """Test cases for the plugin's collisions (tests/collide_test.cpp): the skeleton in a few poses, as the game holds it
 (local translation, world rotation rows = axes, world position), and the pushes the design gives
-(A-Body's p3_collision.py rules, sizes from sizes.json, soft size x1.1, per-group caps).
+(A-Body's p3_collision.py rules, sizes from sizes.json, soft size x1.1, per-group caps, the bones of one
+part coupled as the plugin's CouplePushes does).
 """
 import json
 import os
@@ -61,6 +62,43 @@ def pushes(world):
                     total += (c - P) / d * (contact - d) * 0.5
         L = np.linalg.norm(total)
         out[n] = total * (CAP[g] / L) if L > CAP[g] else total
+    return couple(out)
+
+
+def couple(out):
+    """The bones of one part push as one soft mass (the plugin's CouplePushes): no two differ by more than the
+    part's spread.  A bone with no contact of its own follows the pushed ones; of two pushed bones, the one the move
+    carries further along its own push follows the other; when it would carry both, or take both back against their
+    pushes (a squeeze), they give way evenly."""
+    contact = {n: np.linalg.norm(p) >= 1e-4 for n, p in out.items()}
+    for g in SOFT:
+        for side in (None, "L", "R"):
+            m = [n for g2, n, s in soft if g2 == g and s == side]
+            if len(m) < 2:
+                continue
+            S = natural_rest.PUSH_SPREAD[g]
+            for _ in range(4):
+                for a in range(len(m)):
+                    for b in range(a + 1, len(m)):
+                        i, j = m[a], m[b]
+                        d = out[i] - out[j]
+                        L = np.linalg.norm(d)
+                        if L <= S:
+                            continue
+                        corr = d * ((L - S) / L)
+                        wi = 0.5
+                        if contact[i] != contact[j]:
+                            wi = 0.0 if contact[i] else 1.0
+                        elif contact[i]:
+                            ci, cj = float(d @ out[i]) <= 0.0, float(d @ out[j]) >= 0.0
+                            if ci != cj:
+                                wi = 1.0 if ci else 0.0
+                        out[i] = out[i] - corr * wi
+                        out[j] = out[j] + corr * (1.0 - wi)
+            for n in m:
+                L = np.linalg.norm(out[n])
+                if L > CAP[g]:
+                    out[n] = out[n] * (CAP[g] / L)
     return out
 
 

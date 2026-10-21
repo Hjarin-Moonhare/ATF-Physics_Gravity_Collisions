@@ -906,8 +906,10 @@ static int RunDeadBodies() {
         const std::uint32_t byCalf = g_otherHits[kWhoYours][0][kOtherCalf].load();
         const std::uint32_t byFoot = g_otherHits[kWhoDead][0][kOtherFoot].load();
         g_cfg.othersMeasureOnly = false;
+        g_cfg.couplePushes = false;   // the pushes from the other bodies' shapes alone (the part's coupling has its own cases)
         ActorView a6 = view(fa, actorA, 2, false);
         Collide(a6);
+        g_cfg.couplePushes = true;
         g_cfg.othersMeasureOnly = true;
         const Vec3 pp = push(a6, fa, "TF_Breast_Lower_L");
         const double pushed = std::sqrt(Dot(pp, pp)) * 100;
@@ -2025,6 +2027,76 @@ int main() {
                "(measure only, snapshot)", counted ? "yes" : "no", biggest * 100, g_snapDue.load() ? "no" : "yes",
                ok ? "OK" : "FAIL");
         fails += ok ? 0 : 1;
+    }
+    {   // the bones of one part push as one soft mass (CouplePushes), on the left breast's four bones
+        auto run = [&](const char* what, const Vec3 in[4], const bool hit[4], auto check) {
+            Vec3 push[kNumSoft] = {};
+            bool on[kNumSoft] = {}, contact[kNumSoft] = {};
+            int m[4], n = 0;
+            for (int i = 0; i < kNumSoft; ++i)
+                if (kSoft[i].group == 0 && kSoft[i].side == 0 && n < 4) m[n++] = i;   // Upper, Lower, Inner, Outer
+            for (int k = 0; k < 4; ++k) {
+                push[m[k]] = in[k];
+                on[m[k]] = true;
+                contact[m[k]] = hit[k];
+            }
+            push[1] = {0.03f, 0, 0};   // the right breast's upper bone: another part, left as it is
+            on[1] = contact[1] = true;
+            CouplePushes(push, on, contact, 1.0f);
+            Vec3 out[4];
+            for (int k = 0; k < 4; ++k) out[k] = push[m[k]];
+            double spread = 0;
+            for (int a = 0; a < 4; ++a)
+                for (int b = a + 1; b < 4; ++b) {
+                    const Vec3 d = Sub(out[a], out[b]);
+                    spread = std::fmax(spread, std::sqrt(Dot(d, d)));
+                }
+            char d[200];
+            const bool ok = check(out, spread, d, sizeof(d)) && spread <= kGroupPushSpread[0] + 1e-4 &&
+                            push[1].x == 0.03f && push[1].y == 0.0f && push[1].z == 0.0f;
+            printf("%-14s %-40s %s  %s\n", "push coupling", what, d, ok ? "OK" : "FAIL");
+            fails += ok ? 0 : 1;
+        };
+        const float S = kGroupPushSpread[0];
+        {   // the lower bone pushed 5 cm up, the others free: it keeps its push, they follow to within the spread
+            const Vec3 in[4] = {{0, 0, 0}, {0, 0, 0.05f}, {0, 0, 0}, {0, 0, 0}};
+            const bool hit[4] = {false, true, false, false};
+            run("one bone pushed 5 cm", in, hit, [&](const Vec3* out, double spread, char* d, size_t dn) {
+                snprintf(d, dn, "the pushed bone %.2f cm, the others %.2f / %.2f / %.2f cm (spread %.2f cm, most %.2f)",
+                         out[1].z * 100, out[0].z * 100, out[2].z * 100, out[3].z * 100, spread * 100, S * 100);
+                return std::fabs(out[1].z - 0.05f) < 1e-6f && out[0].z > 0.05f - S - 1e-4f && out[2].z > 0.05f - S - 1e-4f &&
+                       out[3].z > 0.05f - S - 1e-4f;
+            });
+        }
+        {   // two pushed the same way, 2 spreads apart: the less pushed one is carried along, the more pushed one keeps its push
+            const Vec3 in[4] = {{0.2f * S, 0, 0}, {0, 0, 0}, {0, 0, 0}, {2.2f * S, 0, 0}};
+            const bool hit[4] = {true, false, false, true};
+            run("two pushed the same way", in, hit, [&](const Vec3* out, double spread, char* d, size_t dn) {
+                snprintf(d, dn, "the outer bone %.2f cm (pushed %.2f), the upper %.2f cm (pushed %.2f), spread %.2f cm",
+                         out[3].x * 100, 2.2f * S * 100, out[0].x * 100, 0.2f * S * 100, spread * 100);
+                return 2.2f * S <= g_cfg.maxPush[0] && std::fabs(out[3].x - 2.2f * S) < 1e-6f &&
+                       std::fabs(out[0].x - 1.2f * S) < 1e-4f;
+            });
+        }
+        {   // a squeeze: two bones pushed toward each other, 3 spreads apart: both give way evenly
+            const Vec3 in[4] = {{0, 0, 0}, {0, 0, 0}, {1.5f * S, 0, 0}, {-1.5f * S, 0, 0}};
+            const bool hit[4] = {false, false, true, true};
+            run("a squeeze", in, hit, [&](const Vec3* out, double spread, char* d, size_t dn) {
+                snprintf(d, dn, "the inner bone %.2f cm and the outer %.2f cm (pushed %.2f each way), spread %.2f cm",
+                         out[2].x * 100, out[3].x * 100, 1.5f * S * 100, spread * 100);
+                return 1.5f * S <= g_cfg.maxPush[0] && std::fabs(out[2].x - 0.5f * S) < 1e-4f &&
+                       std::fabs(out[3].x + 0.5f * S) < 1e-4f;
+            });
+        }
+        {   // pushes within the spread of each other: nothing changes
+            const Vec3 in[4] = {{0, 0, 0.5f * S}, {0, 0, 0.9f * S}, {0, 0.2f * S, 0}, {0, 0, 0}};
+            const bool hit[4] = {true, true, true, false};
+            run("within the spread", in, hit, [&](const Vec3* out, double, char* d, size_t dn) {
+                snprintf(d, dn, "unchanged: %s", (out[0].z == 0.5f * S && out[1].z == 0.9f * S && out[2].y == 0.2f * S &&
+                                                  out[3].z == 0.0f) ? "yes" : "NO");
+                return out[0].z == 0.5f * S && out[1].z == 0.9f * S && out[2].y == 0.2f * S && out[3].z == 0.0f;
+            });
+        }
     }
     printf("%s\n", fails ? "SOME CASES FAILED" : "all cases passed");
     return fails;

@@ -26,6 +26,11 @@ SOFT = dict(pc.SOFT)
 SOFT["glute"] = ([f"TF_Glute_{b}_{{s}}" for b in ("Upper", "Lower", "Inner", "Outer")], {"forearm": "B", "hand": "B"})
 # glutes 2.5 cm: hands resting on them pushed 2.5 cm at a 59% peak stretch, inside the approved back slump's 62%
 MAX_PUSH = {"breast": 0.05, "belly": 0.03, "innerthigh": 0.03, "glute": 0.025}
+# The soft bones of one part move as one soft mass: no two pushes of a part differ by more than this (m), the furthest
+# one bone moved alone away from the rest of its part, along any axis, leaves the skin smooth: no hard crease, no edge
+# bent 30 degrees past its rest bend, no skin through itself; the navel's own 1-3 mm triangles left out
+# (tests/stretch_limit_push_smooth.py)
+PUSH_SPREAD = {"breast": 0.020, "belly": 0.040, "innerthigh": 0.050, "glute": 0.035}
 # Each capsule starts this far down its limb (0 = at the joint).  The joint end sits inside the shoulder or pelvis:
 # in game it touched the outer breast and the belly in ordinary standing and walking.
 TRIM = {"upperarm": float(os.environ.get("TF_TRIM_UPPERARM", 0.5)), "thigh": float(os.environ.get("TF_TRIM_THIGH", 0.4))}

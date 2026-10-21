@@ -124,6 +124,7 @@ share:
 |---|---|
 | `SOFT` | The soft groups and their bones: breast, belly and inner thigh from `p3_collision.py`, plus the glutes. Each group lists the limbs that push it. |
 | `MAX_PUSH` | The most each group is pushed: breast 5 cm, belly 3, inner thigh 3, glute 2.5. These are the INI's `fMaxPush*Cm` defaults. |
+| `PUSH_SPREAD` | The most two pushes of one part may differ: breast 2 cm, belly 4, inner thigh 5, glute 3.5. Each is the furthest one soft bone moved alone, along any COM axis either way with the rest of its part at rest, with the skin of A-Body's mesh smooth: no triangle turned more than 60° from its rest normal, no edge bent more than 30° past its rest bend, no skin through itself (the navel's own 1 to 3 mm triangles left out: any move of the belly bends them). The whole part moved together stays smooth to breast 5 cm, belly 4, inner thigh 4, glute 3. |
 | `TRIM` | How far down its limb a capsule starts, as a share of the limb's length (0 = at the joint): upper arm 0.5, thigh 0.4. The joint end sits inside the shoulder or pelvis. Set `TF_TRIM_UPPERARM` or `TF_TRIM_THIGH` to try another value. |
 
 Run by itself, it lists what the standing poses changed:
@@ -144,7 +145,8 @@ Writes the collision header from `sizes.json`, `sizes_glute.json` and `natural_r
 - the four limb capsules: the bones each one runs between, its radius, and where it starts (`TRIM`);
 - the hand's tip in the wrist's frame and the wrist in the forearm's frame, used when the finger or wrist bone isn't
   found;
-- per group: the most it's pushed, and which capsules it meets (none, both sides, its own side or the other side);
+- per group: the most it's pushed, the most two of its pushes may differ, and which capsules it meets (none, both
+  sides, its own side or the other side);
 - per soft bone (24 of them): its group, side and radius, its rest distance to each capsule, and up to four soft bones
   of the other side that it meets, with their rest distances.
 
@@ -155,7 +157,7 @@ It prints the soft-bone count and the two fallback offsets, in cm.
 Poses A-Body's skeleton ten ways, and writes what `collide_test.cpp` checks the plugin against: `rest`, `arms_forward`,
 `arms_crossed`, `sitting`, `deep_squat`, `sprint_stride`, `arms_sides`, `arms_hanging`, `hands_on_glutes` and
 `hands_on_glutes_firm`. The expected pushes are worked out here, not by the plugin's code: the same contact rule, half
-for soft against soft, capped per group.
+for soft against soft, capped per group, and a part's pushes coupled the same way.
 
 Each file, in metres:
 

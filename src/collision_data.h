@@ -14,6 +14,8 @@ constexpr float kWristInForearm[2][3] = {{0.2306f, -0.0000f, -0.0000f}, {0.2306f
 constexpr int kNumGroups = 4;
 // soft groups: 0 breast, 1 belly, 2 innerthigh, 3 glute
 constexpr float kGroupMaxPush[kNumGroups] = {0.050f, 0.030f, 0.030f, 0.025f};
+// the most two soft bones of one part may differ in their pushes (m; tools/natural_rest.py PUSH_SPREAD)
+constexpr float kGroupPushSpread[kNumGroups] = {0.020f, 0.040f, 0.050f, 0.035f};
 // which colliders a group meets: 0 none, 1 both sides, 2 own side only, 3 other side only
 constexpr int kGroupMeets[kNumGroups][kNumColliders] = {
     {1, 1, 1, 1},

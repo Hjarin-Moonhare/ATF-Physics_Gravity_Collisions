@@ -30,7 +30,8 @@ match, it patches nothing and says why in its log.
   - upper arms, forearms, hands and thighs push the breasts;
   - forearms, hands and thighs push the belly;
   - forearms and hands push the glutes;
-  - the breasts push each other, and other characters' bodies push too.
+  - the breasts push each other, and other characters' bodies push too;
+  - the bones of one part are pushed as one soft mass, so a press bends the skin instead of folding it.
 - World collision (logging build only): two Havok proxy bodies per A-Body body, steered to the breasts every frame.
   They collide with nothing yet. See [docs/WORLD_COLLISION.md](docs/WORLD_COLLISION.md).
 
