@@ -1,7 +1,8 @@
 """Test cases for the plugin's dents (tests/dent_test.cpp): a body's dent rig (tests/data/DentRig_<rig>.bin, copied
 from A-Body's build) and, per pose, every rig bone's world transform (the collision cases' skeleton with the designed
-pushes on the soft bones, tests/export_collision_cases.py) with the dents the design model gives (tools/dent_model.py).
-Usage: python tests/export_dent_cases.py [rig dir A] [rig dir B]
+pushes on the soft bones, tests/export_collision_cases.py) with the dents the design model gives (tools/dent_model.py):
+per region its dent bones' moves (D) and, when the region tilts, their tilts (W, 3 per dent bone, parent frame).
+Usage: python tests/export_dent_cases.py [rig dir A] [rig dir B] [rig dir C]
 """
 import os
 import shutil
@@ -16,7 +17,8 @@ import export_collision_cases as ecc  # noqa: E402
 import dent_model  # noqa: E402
 
 ABODY_BUILDS = os.environ.get("ABODY_BUILDS", "abody_builds")
-RIGS = {"A": os.path.join(ABODY_BUILDS, "A-Body_DentRig_A"), "B": os.path.join(ABODY_BUILDS, "A-Body_DentRig_B")}
+RIGS = {"A": os.path.join(ABODY_BUILDS, "A-Body_DentRig_A"), "B": os.path.join(ABODY_BUILDS, "A-Body_DentRig_B"),
+        "C": os.path.join(ABODY_BUILDS, "A-Body_DentRig_C")}
 POSES = ("rest", "arms_crossed", "arms_forward", "hands_on_glutes", "hands_on_glutes_firm", "sitting", "folded",
          "clasped", "across") + ecc.MOD_POSES
 PRIVATE = set(ecc.MOD_POSES)   # made from another author's pose mod: kept in the development tree only
@@ -52,8 +54,8 @@ def xf_line(i, name, M):
 
 
 def main():
-    if len(sys.argv) > 2:
-        RIGS["A"], RIGS["B"] = sys.argv[1], sys.argv[2]
+    for tag, arg in zip("ABC", sys.argv[1:]):
+        RIGS[tag] = arg
     os.makedirs(DATA, exist_ok=True)
     os.makedirs(OUT, exist_ok=True)
     for tag, d in RIGS.items():
@@ -70,9 +72,11 @@ def main():
                 st_all = {}
                 for R in rig["regions"]:
                     st = {}
-                    D = dent_model.solve_region(rig, R, world, morph, 1.0, st)
+                    D, W = dent_model.solve_region2(rig, R, world, morph, 1.0, st)
                     st_all[R["name"]] = st
                     lines.append(f"D {R['name']} {len(D)} " + " ".join(f"{x:.8f}" for x in D))
+                    if R["rflags"] & 1:
+                        lines.append(f"W {R['name']} {len(D)} " + " ".join(f"{x:.8f}" for x in W.reshape(-1)))
                 name = f"{tag}_{pname}{mtag}.txt"
                 open(os.path.join(OUT, name), "w").write("\n".join(lines) + "\n")
                 deep = max([s.get("dent_cm", 0.0) for s in st_all.values()] or [0.0])

@@ -107,7 +107,7 @@ main thread. All state is per body, keyed by game pointers:
 | Body nodes | `COM` | every bone the collisions use, found once by name | a mutex on insert; checked again by name pointer |
 | Factors | 3D root | size, shape and stretch-guard factors | 4-way cache |
 | Other bodies (128) | `COM` | copied shapes, centre, velocity, time | seqlock: readers skip odd or stale entries and shift by velocity × age |
-| Dent bodies (64) | `COM` | the body's dent bones and the bones they read, found once by name; each region's last solve and the bones it read | a mutex to find or add a body; a body is updated on one thread |
+| Dent bodies (64) | `COM` | the body's dent bones and the bones they read, found once by name; each region's last solve (moves and turns) and the bones it read | a mutex to find or add a body; a body is updated on one thread |
 | `g_tunes` (2) | none | what the tuning files say | two copies: a reload fills the one not in use, then switches (`g_tuneNow`, release / acquire); one reload at a time (`g_tuneBusy`) |
 
 **Counters** are relaxed atomics. The log is a queue drained by its own thread, with the file kept open, so a worker
@@ -189,11 +189,28 @@ on a soft bone (a nipple) moves with it. Up to 64 bodies with a dent rig are kep
 6. A dent bone's local translation is its rest plus its move along its inward line, written to the node and the
    rig's copy like the other bones.
 
+**Version 2 regions** (`TFDENT02`, as the region's flags say):
+- **One shared field:** the unknowns are the values of the field's control points (samples of the region); every
+  dent bone, on whatever bone it rides, takes its move from the field at its rest place (the points' Wendland
+  bumps, normalised), so a vertex dents the same whatever bones it hangs on. The fit is smoothed over the field's
+  edges, and each guard round is solved exactly (`BoxQP`: the primal active-set method, a Cholesky solve on the
+  free values, warm-started from the round before), with the guard's settings from the file.
+- **Tilt:** a dent bone also turns by the slope of the dent around it: omega = g x i, g the gradient of its lattice
+  neighbours' moves in its tangent plane at rest, i its inward line, turned into its parent's frame; the angle is
+  atan |omega|. The turn moves the skin around the bone by the dent's slope and tilts its normals with it; the fit
+  includes that move. The turn and the translation are written together (`WriteTurned`: the node's rows at
+  +0x40, the rig slot's rows at +0x00). `[Dents] bTilt` switches it off.
+
+**The write check** (logging build): at the start of a body's dents, each dent bone written last frame with a dent
+over 2 mm is compared with where its parent's world and the local written put it, and a turned one's axes with
+its parent's axes and the local axes written (both from the same compose). The 5 s log counts the ones where
+written, the ones back at rest and the turns that came out the other way round.
+
 **Over time.** A dent follows its solve within `[Dents] fRelaxTime` (a share of 1 - exp(-dt / fRelaxTime) per
 frame), its depth x `[Dents] fScale`. A region none of whose bones moved more than 0.3 mm since its last solve, at
 the same sliders, keeps that solve, so a still pose costs no solve. A dent bone whose dent has ended is written back
-to its rest once. On A-Body's rigs `dent_test` measures about 70 µs per region solve, and about 150 µs per
-solve with a contact.
+to its rest once. On A-Body's rigs `dent_test` measures about 120 µs per region solve, and about 270 µs per
+solve with a contact; a version 2 region with a contact takes longer (its fit has up to 10 rounds).
 
 ## Build variants
 
@@ -212,8 +229,8 @@ in every build.
 - calls per site and the plugin's own time (ms per second of play, µs per update), split by part;
 - springs held, gravity applied, body-shape scaling;
 - collisions: bodies checked, pushes, contacts by pair with the deepest, other bodies and the shared table;
-- dents: body updates with a dent rig and their cost, how many were dented, the deepest dent and dent bone move,
-  regions solved and regions kept as they were;
+- dents: body updates with a dent rig and their cost, how many were dented, the deepest dent, dent bone move and
+  turn, regions solved and regions kept as they were, and the write check;
 - one gravity sample;
 - the world-collision lines.
 

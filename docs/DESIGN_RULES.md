@@ -202,3 +202,11 @@ the code does instead.
   skin moves exactly as before. After the pushes, the skin an arm, a hand or a leg still presses gets the inward move
   that takes it out, faded out around the contact; the dent bones move inward by the smoothed fit to it, never
   outward and each within its largest move, and a sample dented past its want weighs more in the next round.
+
+**32. A dent moves all of the skin it presses, and its lighting follows it.**
+- Breaks: dent bones that take one bone's weight move only that share of the skin (about 0.4 where an arm presses a
+  breast), so the dents stay too small to see; dent bones that only slide leave the skin's normals as they were, so
+  even a deep dent is lit like flat skin; skin pushed more than about 2 cm inward folds.
+- Fix: dent bones on every bone the skin hangs on, all moved by one shared field (a vertex dents the same whatever
+  bones it hangs on); each dent bone also turns with the slope of the dent, inside the fit; a need is capped at the
+  rig's depth, and contacts are cleared first.

@@ -151,16 +151,19 @@ a typo in its name, or a comment after its value.
 
 ## dent_test.cpp
 
-The dents (`src\dents_core.h`) against their design model (`tools\dent_model.py`), on A-Body's two dent rigs in
-`data\`: `DentRig_A.bin` (50 dent bones in 6 regions: the breasts, glutes and thighs) and `DentRig_B.bin` (156 in
-the two breasts). Each case in `cases_dent\` is one rig in one of nine collision poses with the design's pushes, at
-the base sliders and with the breast, butt and thigh sliders at 0.5 (`_large`). Every dent bone's move must match
-the model's to 0.5 mm.
+The dents (`src\dents_core.h`) against their design model (`tools\dent_model.py`), on A-Body's three dent rigs in
+`data\`: `DentRig_A.bin` (50 dent bones in 6 regions: the breasts, glutes and thighs), `DentRig_B.bin` (156 in
+the two breasts) and `DentRig_C.bin` (version 2: 160 in the two breasts on every bone their skin hangs on, one
+shared field per breast, tilting). Each case in `cases_dent\` is one rig in one of nine collision poses with the
+design's pushes, at the base sliders and with the breast, butt and thigh sliders at 0.5 (`_large`). Every dent
+bone's move must match the model's to 0.5 mm, and on rig C every tilt to 0.005.
 
 - **The rig files:** each one read; four copies cut short (4 bytes, 200 bytes, half, all but the last byte) and one
   with a wrong header turned away with a reason.
 - **A missing bone:** without a dent bone's parent (`C_Chest`), its region isn't dented.
 - **The depth setting:** x0 moves nothing, x2 stays within twice a dent bone's largest move.
+- **The tilt's turn:** three orthonormal, right-handed axes, and to first order the identity plus the tilt's cross
+  product.
 - **The time** of a region's solve, and of one with a contact.
 
 ```
@@ -269,9 +272,11 @@ scale <the body's scale>
 morph <slider> <weight>
 B <index> <bone> 1 <x axis: 3 numbers> <y axis> <z axis> <position x y z> <scale>
 D <region> <count> <each dent bone's move along its inward line>
+W <region> <count> <each dent bone's tilt: 3 numbers, its parent's frame>
 ```
 
 - `morph`: one line per slider that isn't at 0 (none at the base sliders).
 - `B`: one line per rig bone, its world transform as the game stores it; `B <index> <bone> 0` when the pose has no
   such bone.
 - `D`: one line per region, the moves the design model gives.
+- `W`: one line per tilting region (rig C), the tilts the design model gives.

@@ -18,11 +18,22 @@
 //      changes by 0.1 um); then a sample dented past its wanted dent + 2 mm weighs x4, a contact short by over 1 mm
 //      x2, and again (4 rounds at most);
 //   6. a dent bone's local translation = its rest + D x its inward line (parent frame).
+// A version 2 rig (TFDENT02) adds per region, as its flags say:
+//   - one shared field (flag 2): the unknowns are the values F of the field's control points (samples of the region);
+//     a dent bone's move is D = Pm F (the points' Wendland bumps of the bone's rest distance, radius from the file,
+//     normalised), smoothed over the field's edges, each round solved exactly (BoxQP), with the guard rounds'
+//     settings from the file;
+//   - tilt (flag 1, with the field): a dent bone also turns by the slope of the dent around it, omega = g x i (g the
+//     gradient of its lattice neighbours' moves in its tangent plane at rest, i its inward line, mesh space), so the
+//     skin's normals follow the dent; the fit includes what the turn moves (G + Grot); the turn is atan |omega| about
+//     omega, in the parent's frame (the parent's mesh-to-bone rotation x omega).
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dents {
@@ -86,6 +97,24 @@ struct Region {
     V3 centre{};                               // rest bounds (mesh space): centre and radius, sliders included
     float radius = 0;
     int carrier = -1;                          // the bone the bounds ride on (the first dent bone's parent)
+    // version 2
+    std::uint32_t flags = 0;                   // 1 the dents tilt, 2 one shared field
+    float overT = 0.002f, overW = 4.0f, shortT = 0.001f, shortW = 2.0f;   // the guard rounds: a sample dented past its
+    std::uint32_t rounds = 4;                  // want by overT weighs x overW, a contact short by shortT x shortW
+    std::vector<std::uint16_t> field;          // the shared field's control points (samples)
+    float fieldRadius = 0;                     // their bumps' radius (m)
+    std::vector<Edge> fieldEdges;
+    std::vector<float> fieldLap;               // nf x nf
+    std::vector<std::uint32_t> pm0;            // per dent bone: D = sum of pmVal x F[pmIdx]
+    std::vector<std::uint16_t> pmIdx;
+    std::vector<float> pmVal;
+    std::vector<std::uint32_t> om0;            // per dent bone: its tilt (mesh) = sum of omVal x D[omIdx]
+    std::vector<std::uint16_t> omIdx;
+    std::vector<V3> omVal;
+    std::vector<std::uint32_t> gr0;            // per sample: what the tilt moves it inward, per unit of a dent bone's move
+    std::vector<std::uint16_t> grIdx;
+    std::vector<float> grVal;
+    std::vector<float> srot;                   // nd x 9: each dent bone's parent's mesh-to-bone rotation (rows, no scale)
 };
 struct Rig {
     std::vector<Bone> bones;
@@ -97,8 +126,9 @@ struct Rig {
 
 constexpr float kNeighbour = 0.015f;
 constexpr float kSlack = 0.08f;   // the region's bounds + this much: its bones' own moves (springs, pushes) on top
-constexpr int kSweeps = 60, kRounds = 4, kBisect = 18;
+constexpr int kSweeps = 60, kBisect = 18;
 constexpr float kSettled = 1e-7f;   // a sweep that changes no move by more than this (m) ends the sweeps
+constexpr double kTiltRidge = 1e-6;   // m^2, on a dent bone's gradient fit
 
 inline float Wendland(float x) {
     if (x <= 0) return 1.0f;
@@ -129,9 +159,150 @@ struct Reader {
     V3 Vec() { const float x = Get<float>(), y = Get<float>(), z = Get<float>(); return {x, y, z}; }
 };
 
+// version 2: the shared field's bumps and smoothing, the tilt's operators (in double, like the design model)
+inline void Derive2(const Rig& rig, Region& R) {
+    struct D3 { double x, y, z; };
+    auto sub = [](D3 a, D3 b) { return D3{a.x - b.x, a.y - b.y, a.z - b.z}; };
+    auto dot = [](D3 a, D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+    auto cross = [](D3 a, D3 b) { return D3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; };
+    auto unit = [&](D3 a) { const double l = std::sqrt(dot(a, a)); return l > 1e-12 ? D3{a.x / l, a.y / l, a.z / l} : a; };
+    auto d3 = [](V3 v) { return D3{v.x, v.y, v.z}; };
+    const size_t nd = R.dent.size(), ns = R.samples.size();
+    std::vector<D3> P(nd), I(nd);
+    R.srot.assign(nd * 9, 0.0f);
+    for (size_t k = 0; k < nd; ++k) {   // the dent bones' rest places and inward lines in mesh space
+        const Bind& b = rig.bones[static_cast<size_t>(R.dent[k].parent)].bind;
+        double m[9];
+        for (int i = 0; i < 9; ++i) m[i] = b.r[i];
+        const double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) +
+                           m[2] * (m[3] * m[7] - m[4] * m[6]);
+        const double inv[9] = {(m[4] * m[8] - m[5] * m[7]) / det, (m[2] * m[7] - m[1] * m[8]) / det,
+                               (m[1] * m[5] - m[2] * m[4]) / det, (m[5] * m[6] - m[3] * m[8]) / det,
+                               (m[0] * m[8] - m[2] * m[6]) / det, (m[2] * m[3] - m[0] * m[5]) / det,
+                               (m[3] * m[7] - m[4] * m[6]) / det, (m[1] * m[6] - m[0] * m[7]) / det,
+                               (m[0] * m[4] - m[1] * m[3]) / det};
+        auto mul = [&](const double* a, D3 v) {
+            return D3{a[0] * v.x + a[1] * v.y + a[2] * v.z, a[3] * v.x + a[4] * v.y + a[5] * v.z,
+                      a[6] * v.x + a[7] * v.y + a[8] * v.z};
+        };
+        const V3 rest = R.dent[k].rest;
+        P[k] = mul(inv, D3{rest.x - b.t[0], rest.y - b.t[1], rest.z - b.t[2]});
+        I[k] = unit(mul(inv, d3(R.dent[k].inward)));
+        const double sc = std::cbrt(std::fabs(det));
+        for (int i = 0; i < 9; ++i) R.srot[k * 9 + static_cast<size_t>(i)] = static_cast<float>(m[i] / sc);
+    }
+    if (R.flags & 2) {   // the shared field: each dent bone's bumps of the control points, normalised
+        const size_t nf = R.field.size();
+        R.pm0.assign(nd + 1, 0);
+        R.pmIdx.clear();
+        R.pmVal.clear();
+        std::vector<double> w(nf);
+        for (size_t k = 0; k < nd; ++k) {
+            R.pm0[k] = static_cast<std::uint32_t>(R.pmIdx.size());
+            double sum = 0, best = 1e300;
+            size_t nearest = 0;
+            for (size_t m = 0; m < nf; ++m) {
+                const D3 d = sub(P[k], d3(R.samples[R.field[m]].p));
+                const double dist = std::sqrt(dot(d, d));
+                const double x = dist / R.fieldRadius;
+                w[m] = x >= 1 ? 0.0 : std::pow(1 - x, 4) * (4 * x + 1);
+                sum += w[m];
+                if (dist < best) { best = dist; nearest = m; }
+            }
+            if (sum <= 0) { w[nearest] = 1; sum = 1; }
+            for (size_t m = 0; m < nf; ++m)
+                if (w[m] > 0) {
+                    R.pmIdx.push_back(static_cast<std::uint16_t>(m));
+                    R.pmVal.push_back(static_cast<float>(w[m] / sum));
+                }
+        }
+        R.pm0[nd] = static_cast<std::uint32_t>(R.pmIdx.size());
+        R.fieldLap.assign(nf * nf, 0.0f);
+        for (const Edge& e : R.fieldEdges) {
+            const size_t a = e.a, b = e.b;
+            R.fieldLap[a * nf + a] += e.w;
+            R.fieldLap[b * nf + b] += e.w;
+            R.fieldLap[a * nf + b] -= e.w;
+            R.fieldLap[b * nf + a] -= e.w;
+        }
+    }
+    if (R.flags & 1) {   // the tilt: each dent bone's omega from its neighbours' moves; what it moves each sample
+        std::vector<std::vector<size_t>> nbr(nd);
+        for (const Edge& e : R.edges) {
+            nbr[e.a].push_back(e.b);
+            nbr[e.b].push_back(e.a);
+        }
+        std::vector<std::vector<std::pair<size_t, D3>>> om(nd);   // omega_k = sum coef x D_m
+        for (size_t k = 0; k < nd; ++k) {
+            const D3 n = I[k];
+            const D3 t1 = unit(cross(n, std::fabs(n.z) < 0.9 ? D3{0, 0, 1} : D3{1, 0, 0}));
+            const D3 t2 = cross(n, t1);
+            const std::vector<size_t>& nb = nbr[k];
+            if (nb.size() < 2) continue;
+            double a = kTiltRidge, bb = 0, c = kTiltRidge;   // U^T U + ridge
+            std::vector<double> u1(nb.size()), u2(nb.size());
+            for (size_t q = 0; q < nb.size(); ++q) {
+                const D3 d = sub(P[nb[q]], P[k]);
+                u1[q] = dot(d, t1);
+                u2[q] = dot(d, t2);
+                a += u1[q] * u1[q];
+                bb += u1[q] * u2[q];
+                c += u2[q] * u2[q];
+            }
+            const double det = a * c - bb * bb;
+            D3 self{0, 0, 0};
+            for (size_t q = 0; q < nb.size(); ++q) {
+                const double g1 = (c * u1[q] - bb * u2[q]) / det, g2 = (a * u2[q] - bb * u1[q]) / det;
+                const D3 g{t1.x * g1 + t2.x * g2, t1.y * g1 + t2.y * g2, t1.z * g1 + t2.z * g2};   // gradient per move
+                const D3 o = cross(n, g);                                                     // -[n]x g = g x n
+                om[k].push_back({nb[q], D3{-o.x, -o.y, -o.z}});
+                self = D3{self.x + o.x, self.y + o.y, self.z + o.z};
+            }
+            om[k].push_back({k, self});
+        }
+        R.om0.assign(nd + 1, 0);
+        R.omIdx.clear();
+        R.omVal.clear();
+        for (size_t k = 0; k < nd; ++k) {
+            R.om0[k] = static_cast<std::uint32_t>(R.omIdx.size());
+            for (const auto& [m, v] : om[k]) {
+                R.omIdx.push_back(static_cast<std::uint16_t>(m));
+                R.omVal.push_back({static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)});
+            }
+        }
+        R.om0[nd] = static_cast<std::uint32_t>(R.omIdx.size());
+        R.gr0.assign(ns + 1, 0);
+        R.grIdx.clear();
+        R.grVal.clear();
+        std::vector<double> acc(nd);
+        for (size_t si = 0; si < ns; ++si) {
+            R.gr0[si] = static_cast<std::uint32_t>(R.grIdx.size());
+            std::fill(acc.begin(), acc.end(), 0.0);
+            const Sample& smp = R.samples[si];
+            const D3 nn = unit(d3(smp.n));
+            const D3 in{-nn.x, -nn.y, -nn.z};
+            for (int i = 0; i < smp.nd; ++i) {
+                const DentW& dw = R.dw[smp.dent0 + static_cast<std::uint32_t>(i)];
+                const D3 av = cross(in, sub(d3(smp.p), P[dw.dent]));
+                for (const auto& [m, v] : om[dw.dent]) acc[m] += -static_cast<double>(dw.c) * dot(av, v);
+            }
+            for (size_t m = 0; m < nd; ++m)
+                if (acc[m] != 0.0) {
+                    R.grIdx.push_back(static_cast<std::uint16_t>(m));
+                    R.grVal.push_back(static_cast<float>(acc[m]));
+                }
+        }
+        R.gr0[ns] = static_cast<std::uint32_t>(R.grIdx.size());
+    }
+}
+
 inline bool Load(const std::uint8_t* data, size_t size, Rig& rig, std::string& err) {
     rig = Rig{};
-    if (size < 8 || std::memcmp(data, "TFDENT01", 8)) { err = "not a dent rig file"; return false; }
+    if (size < 8 || (std::memcmp(data, "TFDENT01", 8) && std::memcmp(data, "TFDENT02", 8))) {
+        err = "not a dent rig file";
+        return false;
+    }
+    const int version = data[7] == '2' ? 2 : 1;
     Reader r{data, size, 8};
     const std::uint32_t nb = r.Get<std::uint32_t>();
     if (!r.ok || nb > 4096) { err = "bad bone count"; return false; }
@@ -178,6 +349,34 @@ inline bool Load(const std::uint8_t* data, size_t size, Rig& rig, std::string& e
         R.lamS = r.Get<float>();
         R.tsm = r.Get<std::uint32_t>();
         (void)r.Get<float>();   // the breast's top (the samples carry their own flag)
+        if (version == 2) {
+            R.flags = r.Get<std::uint32_t>();
+            R.overT = r.Get<float>();
+            R.overW = r.Get<float>();
+            R.shortT = r.Get<float>();
+            R.shortW = r.Get<float>();
+            R.rounds = r.Get<std::uint32_t>();
+            if (!r.ok || R.rounds > 64 || (R.flags & ~3u) || ((R.flags & 1) && !(R.flags & 2))) {
+                err = "bad region flags";
+                return false;
+            }
+            if (R.flags & 2) {
+                const std::uint32_t nf = r.Get<std::uint32_t>();
+                if (!r.ok || nf == 0 || nf > 256) { err = "bad field count"; return false; }
+                R.field.resize(nf);
+                for (auto& f : R.field) f = r.Get<std::uint16_t>();
+                R.fieldRadius = r.Get<float>();
+                const std::uint32_t nfe = r.Get<std::uint32_t>();
+                if (!r.ok || !(R.fieldRadius > 0) || nfe > 100000) { err = "bad field"; return false; }
+                R.fieldEdges.resize(nfe);
+                for (auto& e : R.fieldEdges) {
+                    e.a = r.Get<std::uint16_t>();
+                    e.b = r.Get<std::uint16_t>();
+                    e.w = r.Get<float>();
+                    if (e.a >= nf || e.b >= nf) { err = "field edge out of range"; return false; }
+                }
+            }
+        }
         const std::uint32_t nd = r.Get<std::uint32_t>();
         if (!r.ok || nd == 0 || nd > 255) { err = "bad dent bone count"; return false; }
         R.dent.resize(nd);
@@ -274,6 +473,9 @@ inline bool Load(const std::uint8_t* data, size_t size, Rig& rig, std::string& e
         R.centre = Mul(Add(lo, hi), 0.5f);
         R.radius = Len(Sub(hi, lo)) * 0.5f + slide;
         R.carrier = R.dent[0].parent;
+        for (std::uint16_t f : R.field)
+            if (f >= ns) { err = "field point out of range"; return false; }
+        if (R.flags) Derive2(rig, R);
         rig.totalDent += static_cast<int>(nd);
     }
     if (r.o != size) { err = "trailing bytes"; return false; }
@@ -289,8 +491,13 @@ struct Work {
     std::vector<std::uint8_t> act, act2;
     std::vector<int> ia, slot, rowAt, colOf;
     std::vector<float> valOf;
+    std::vector<float> gm, F;   // a shared field's rows (samples x control points) and values
+    std::vector<double> Md, rhsd, Fd, Lq, bq, xq;   // its fit (double): the normal matrix, its right side, the values,
+    std::vector<int> Wq;                            // and the box QP's working set and buffers
+    std::vector<size_t> fr;
+    std::vector<std::pair<std::uint32_t, float>> more;   // the guard round's samples to weigh more, and by how much
 };
-struct RegionStats { int contacts = 0; float need = 0, dent = 0, left = 0, bone = 0; };
+struct RegionStats { int contacts = 0; float need = 0, dent = 0, left = 0, bone = 0, tilt = 0; };   // tilt: radians
 #ifdef DENTS_PROFILE
 #include <chrono>
 inline double g_prof[6] = {};   // place, needs, wanted, fit build, fit sweeps, the rest (microseconds)
@@ -338,12 +545,104 @@ inline bool Segment(const Rig& rig, const Collider& c, const Xf* world, const st
     return true;
 }
 
+// min 1/2 F'MF - rhs'F with 0 <= F <= hi (M symmetric positive definite, n x n): the primal active-set method, each step
+// an exact solve on the free set (Cholesky); wk.Fd is the warm start and the result.  A step that would leave the box
+// stops at the first bound it meets (the lowest index on a tie) and fixes that one; at the free set's solution the fixed
+// one with the largest wrong-signed gradient (over 1e-9 x (1 + max |rhs|); the lowest index on a tie) is freed; at most
+// 4n + 10 steps.
+inline void BoxQP(const std::vector<double>& M, const std::vector<double>& rhs, size_t n, double hi, Work& wk) {
+    std::vector<double>& F = wk.Fd;
+    std::vector<int>& W = wk.Wq;
+    W.assign(n, 0);
+    double rmax = 0;
+    for (size_t i = 0; i < n; ++i) {
+        F[i] = F[i] < 0 ? 0 : (F[i] > hi ? hi : F[i]);
+        W[i] = F[i] <= 0 ? -1 : (F[i] >= hi ? 1 : 0);
+        rmax = std::fmax(rmax, std::fabs(rhs[i]));
+    }
+    const double tol = 1e-9 * (1.0 + rmax);
+    for (size_t it = 0; it < 4 * n + 10; ++it) {
+        wk.fr.clear();
+        for (size_t i = 0; i < n; ++i)
+            if (!W[i]) wk.fr.push_back(i);
+        const size_t m = wk.fr.size();
+        if (m) {
+            wk.bq.resize(m);
+            wk.xq.resize(m);
+            wk.Lq.resize(m * m);
+            for (size_t a = 0; a < m; ++a) {
+                const size_t i = wk.fr[a];
+                double v = rhs[i];
+                for (size_t j = 0; j < n; ++j)
+                    if (W[j]) v -= M[i * n + j] * F[j];
+                wk.bq[a] = v;
+            }
+            for (size_t a = 0; a < m; ++a)   // Cholesky: the free block = L L'
+                for (size_t c = 0; c <= a; ++c) {
+                    double v = M[wk.fr[a] * n + wk.fr[c]];
+                    for (size_t k = 0; k < c; ++k) v -= wk.Lq[a * m + k] * wk.Lq[c * m + k];
+                    wk.Lq[a * m + c] = a == c ? std::sqrt(v > 1e-300 ? v : 1e-300) : v / wk.Lq[c * m + c];
+                }
+            for (size_t a = 0; a < m; ++a) {   // L y = b
+                double v = wk.bq[a];
+                for (size_t k = 0; k < a; ++k) v -= wk.Lq[a * m + k] * wk.xq[k];
+                wk.xq[a] = v / wk.Lq[a * m + a];
+            }
+            for (size_t a = m; a-- > 0;) {   // L' x = y
+                double v = wk.xq[a];
+                for (size_t k = a + 1; k < m; ++k) v -= wk.Lq[k * m + a] * wk.xq[k];
+                wk.xq[a] = v / wk.Lq[a * m + a];
+            }
+            bool out = false;
+            for (size_t a = 0; a < m && !out; ++a) out = wk.xq[a] < 0 || wk.xq[a] > hi;
+            if (out) {
+                double alpha = 1;
+                size_t block = n;
+                int bound = 0;
+                for (size_t a = 0; a < m; ++a) {
+                    const size_t i = wk.fr[a];
+                    const double d = wk.xq[a] - F[i];
+                    if (wk.xq[a] < 0 && d < 0) {
+                        const double al = -F[i] / d;
+                        if (al < alpha) { alpha = al; block = i; bound = -1; }
+                    } else if (wk.xq[a] > hi && d > 0) {
+                        const double al = (hi - F[i]) / d;
+                        if (al < alpha) { alpha = al; block = i; bound = 1; }
+                    }
+                }
+                for (size_t a = 0; a < m; ++a) F[wk.fr[a]] += alpha * (wk.xq[a] - F[wk.fr[a]]);
+                if (block < n) {
+                    F[block] = bound < 0 ? 0 : hi;
+                    W[block] = bound;
+                }
+                continue;
+            }
+            for (size_t a = 0; a < m; ++a) F[wk.fr[a]] = wk.xq[a];
+        }
+        size_t worst = n;
+        double wv = tol;
+        for (size_t i = 0; i < n; ++i) {
+            if (!W[i]) continue;
+            double g = -rhs[i];
+            for (size_t j = 0; j < n; ++j) g += M[i * n + j] * F[j];
+            if (W[i] == -1 && -g > wv) { worst = i; wv = -g; }
+            else if (W[i] == 1 && g > wv) { worst = i; wv = g; }
+        }
+        if (worst == n) break;
+        W[worst] = 0;
+    }
+}
+
 // The dent bones' inward moves D (m, one per dent bone of the region; zeros when nothing comes near).  scale: the
-// dents' size factor (E_MAX and D_MAX); actorScale: the body's scale (every length).
+// dents' size factor (E_MAX and D_MAX); actorScale: the body's scale (every length).  W (3 per dent bone, or null):
+// each dent bone's tilt in its parent's frame (zeros unless the region tilts and tilt is on).
 inline void SolveRegion(const Rig& rig, const Region& R, const Xf* world, const std::uint8_t* have, const float* morphW,
-                        float scale, float actorScale, float* D, RegionStats* st, Work& wk) {
+                        float scale, float actorScale, float* D, RegionStats* st, Work& wk, float* W = nullptr,
+                        bool tilt = true) {
     const int nd = static_cast<int>(R.dent.size());
     for (int j = 0; j < nd; ++j) D[j] = 0.0f;
+    if (W)
+        for (int j = 0; j < 3 * nd; ++j) W[j] = 0.0f;
     if (st) *st = RegionStats{};
     if (R.carrier < 0 || !have[R.carrier]) return;
     for (const DentBone& d : R.dent)
@@ -454,8 +753,113 @@ inline void SolveRegion(const Rig& rig, const Region& R, const Xf* world, const 
         for (size_t k = 0; k < ns; ++k) wk.t[k] = std::fmax(wk.t2[k], wk.e[k]);
     }
     DENT_PROF(2)
-    // the dent bones that take part: under the wanted dent, and one ring of their lattice neighbours
     const size_t ndz = static_cast<size_t>(nd);
+    if (R.flags & 2) {   // version 2: one shared field, the tilt in the rows
+        wk.nj.resize(ndz);
+        for (size_t j = 0; j < ndz; ++j) {
+            V3 n = Turn(world[R.dent[j].parent], R.dent[j].inward);
+            const float ln = Len(n);
+            wk.nj[j] = ln > 1e-12f ? Mul(n, 1.0f / ln) : n;
+        }
+        const bool tiltOn = tilt && (R.flags & 1);
+        const size_t nf = R.field.size();
+        wk.gm.assign(ns * nf, 0.0f);
+        wk.fs.clear();
+        for (size_t k = 0; k < ns; ++k) {
+            float* row = &wk.gm[k * nf];
+            const Sample& s = R.samples[k];
+            for (int i = 0; i < s.nd; ++i) {
+                const DentW& d = R.dw[s.dent0 + static_cast<std::uint32_t>(i)];
+                const float gv = d.c * -Dot(wk.N[k], wk.nj[d.dent]);
+                for (std::uint32_t q = R.pm0[d.dent]; q < R.pm0[d.dent + 1u]; ++q) row[R.pmIdx[q]] += gv * R.pmVal[q];
+            }
+            if (tiltOn)
+                for (std::uint32_t q = R.gr0[k]; q < R.gr0[k + 1]; ++q) {
+                    const std::uint16_t j = R.grIdx[q];
+                    for (std::uint32_t p2 = R.pm0[j]; p2 < R.pm0[j + 1u]; ++p2) row[R.pmIdx[p2]] += R.grVal[q] * R.pmVal[p2];
+                }
+            for (size_t m = 0; m < nf; ++m)
+                if (std::fabs(row[m]) > 1e-9f) { wk.fs.push_back(static_cast<std::uint32_t>(k)); break; }
+        }
+        wk.w.assign(ns, 1.0f);
+        wk.Fd.assign(nf, 0.0);
+        wk.Md.assign(nf * nf, 0.0);
+        wk.rhsd.assign(nf, 0.0);
+        wk.got.assign(ns, 0.0f);
+        auto addRow = [&](std::uint32_t k, double wgt) {   // M += wgt row row', rhs += wgt row t
+            const float* row = &wk.gm[k * nf];
+            for (size_t a2 = 0; a2 < nf; ++a2) {
+                if (row[a2] == 0.0f) continue;
+                const double ra = row[a2] * wgt;
+                wk.rhsd[a2] += ra * wk.t[k];
+                double* mrow = &wk.Md[a2 * nf];
+                for (size_t b2 = 0; b2 < nf; ++b2) mrow[b2] += ra * row[b2];
+            }
+        };
+        for (std::uint32_t k : wk.fs) addRow(k, 1.0);
+        for (size_t a2 = 0; a2 < nf * nf; ++a2) wk.Md[a2] += static_cast<double>(R.lamS) * R.fieldLap[a2];
+        for (size_t a2 = 0; a2 < nf; ++a2) wk.Md[a2 * nf + a2] += 1e-6;
+        DENT_PROF(3)
+        const double dMax = static_cast<double>(R.dMax) * scale * actorScale;
+        for (std::uint32_t round = 0; round < R.rounds; ++round) {
+            BoxQP(wk.Md, wk.rhsd, nf, dMax, wk);
+            DENT_PROF(4)
+            for (std::uint32_t k : wk.fs) {
+                const float* row = &wk.gm[k * nf];
+                double v = 0;
+                for (size_t m = 0; m < nf; ++m) v += row[m] * wk.Fd[m];
+                wk.got[k] = static_cast<float>(v);
+            }
+            // the guard: overshoots weigh more, then contacts left short
+            std::vector<std::pair<std::uint32_t, float>>& more = wk.more;
+            more.clear();
+            for (std::uint32_t k : wk.fs)
+                if (wk.got[k] > wk.t[k] + R.overT) more.push_back({k, R.overW});
+            for (std::uint32_t c : wk.con)
+                if (wk.got[c] < wk.e[c] - R.shortT) {
+                    bool in = false;
+                    for (std::uint32_t k : wk.fs)
+                        if (k == c) { in = true; break; }
+                    if (in) more.push_back({c, R.shortW});
+                }
+            DENT_PROF(5)
+            if (more.empty()) break;
+            for (const auto& [k, f] : more) {
+                const double dw = static_cast<double>(wk.w[k]) * (f - 1.0);
+                wk.w[k] *= f;
+                addRow(k, dw);
+            }
+        }
+        wk.F.resize(nf);
+        for (size_t m = 0; m < nf; ++m) wk.F[m] = static_cast<float>(wk.Fd[m]);
+        for (size_t j = 0; j < ndz; ++j) {
+            float v = 0;
+            for (std::uint32_t q = R.pm0[j]; q < R.pm0[j + 1]; ++q) v += R.pmVal[q] * wk.F[R.pmIdx[q]];
+            D[j] = v;
+        }
+        float tiltMax = 0;
+        if (tiltOn && W)
+            for (size_t j = 0; j < ndz; ++j) {
+                V3 om{0, 0, 0};
+                for (std::uint32_t q = R.om0[j]; q < R.om0[j + 1]; ++q) om = Add(om, Mul(R.omVal[q], D[R.omIdx[q]]));
+                const float* sr = &R.srot[j * 9];
+                W[3 * j + 0] = sr[0] * om.x + sr[1] * om.y + sr[2] * om.z;
+                W[3 * j + 1] = sr[3] * om.x + sr[4] * om.y + sr[5] * om.z;
+                W[3 * j + 2] = sr[6] * om.x + sr[7] * om.y + sr[8] * om.z;
+                tiltMax = std::fmax(tiltMax, Len(om));
+            }
+        if (st) {
+            for (std::uint32_t k : wk.fs) st->dent = std::fmax(st->dent, wk.got[k]);
+            for (std::uint32_t c : wk.con) {
+                st->need = std::fmax(st->need, wk.e[c]);
+                st->left = std::fmax(st->left, wk.e[c] - wk.got[c]);
+            }
+            for (size_t j = 0; j < ndz; ++j) st->bone = std::fmax(st->bone, D[j]);
+            st->tilt = std::atan(tiltMax);
+        }
+        return;
+    }
+    // the dent bones that take part: under the wanted dent, and one ring of their lattice neighbours
     wk.act.assign(ndz, 0);
     for (size_t k = 0; k < ns; ++k) {
         if (wk.t[k] <= 0) continue;
@@ -501,7 +905,7 @@ inline void SolveRegion(const Rig& rig, const Region& R, const Xf* world, const 
     wk.Da.assign(na, 0.0f);
     wk.got.assign(ns, 0.0f);
     const float dMax = R.dMax * scale * actorScale;
-    for (int round = 0; round < kRounds; ++round) {
+    for (std::uint32_t round = 0; round < R.rounds; ++round) {
         for (size_t x = 0; x < na; ++x) {
             const float* lrow = &R.lap[static_cast<size_t>(wk.ia[x]) * ndz];
             for (size_t y = 0; y < na; ++y) wk.M[x * na + y] = R.lamS * lrow[static_cast<size_t>(wk.ia[y])];
@@ -561,10 +965,10 @@ inline void SolveRegion(const Rig& rig, const Region& R, const Xf* world, const 
                 if (x >= 0) v += g(k, i) * wk.Da[static_cast<size_t>(x)];
             }
             wk.got[k] = v;
-            if (v > wk.t[k] + 0.002f) { wk.w[k] *= 4.0f; any = true; }
+            if (v > wk.t[k] + R.overT) { wk.w[k] *= R.overW; any = true; }
         }
         for (std::uint32_t c : wk.con)
-            if (wk.got[c] < wk.e[c] - 0.001f) { wk.w[c] *= 2.0f; any = true; }
+            if (wk.got[c] < wk.e[c] - R.shortT) { wk.w[c] *= R.shortW; any = true; }
         DENT_PROF(5)
         if (!any) break;
     }
@@ -577,6 +981,22 @@ inline void SolveRegion(const Rig& rig, const Region& R, const Xf* world, const 
         }
         for (int j = 0; j < nd; ++j) st->bone = std::fmax(st->bone, D[j]);
     }
+}
+
+// A tilt's turn (atan |w| about w, w in the parent's frame) as the child's three axes in the parent's frame: the rows
+// a node keeps its local rotation in.
+inline void TiltAxes(const float* w, V3 ax[3]) {
+    const float th = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (th < 1e-12f) {
+        ax[0] = {1, 0, 0};
+        ax[1] = {0, 1, 0};
+        ax[2] = {0, 0, 1};
+        return;
+    }
+    const float kx = w[0] / th, ky = w[1] / th, kz = w[2] / th, a = std::atan(th), sn = std::sin(a), c1 = 1 - std::cos(a);
+    ax[0] = {1 + c1 * (kx * kx - 1), sn * kz + c1 * kx * ky, -sn * ky + c1 * kx * kz};   // column 0 of I + s K + c K^2
+    ax[1] = {-sn * kz + c1 * kx * ky, 1 + c1 * (ky * ky - 1), sn * kx + c1 * ky * kz};
+    ax[2] = {sn * ky + c1 * kx * kz, -sn * kx + c1 * ky * kz, 1 + c1 * (kz * kz - 1)};
 }
 
 }  // namespace dents

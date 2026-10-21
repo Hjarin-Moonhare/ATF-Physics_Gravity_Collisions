@@ -20,8 +20,8 @@
 //                             held to the base body's skin stretch (the stretch guard); then collisions: upper arms,
 //                             forearms, hands and thighs push the soft bones, the breasts push each other, other
 //                             bodies push too, the arms and hands below a breast lift it; then, on a body with a dent
-//                             rig (DentRig.bin), the arms, hands and legs still pressing into its skin dent it
-//                             (dents_core.h)
+//                             rig (DentRig.bin), the arms, hands and legs still pressing into its skin dent it,
+//                             the dent bones turning with the dent's slope (dents_core.h)
 // Writes go where the game's own setter writes: the node's local translation and the skeleton rig's copy of it.
 // The installed gravity level (x1, x2, x3) is read from the corrective records themselves; breast gravity also follows
 // the breast size sliders (sfee's morph-target weights on the character's record).
@@ -115,7 +115,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 26, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 27, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -384,6 +384,7 @@ struct Settings {
     bool breastSize = true;       // [Collision] bBreastSize: a breast's collision shape, cap and spread follow its size
     bool breastLift = true;       // [Collision] bBreastLift: a breast is lifted over the arms and hands below it
     bool dents = true;            // [Dents] bEnabled: an arm, a hand or a leg dents the skin it presses (a body with a dent rig)
+    bool dentTilt = true;         // [Dents] bTilt: a dent bone also turns with the dent's slope (a rig whose regions tilt)
     float dentScale = 1.0f;       // ... [Dents] fScale: the dents' depth x this (0 to 3)
     float dentRelax = 0.06f;      // ... [Dents] fRelaxTime: a dent follows its contact within about this (s; 0 = at once)
     float deadMaxAge = 0.75f;     // ... a dead body lying still is used from a share up to this old (s)
@@ -490,6 +491,7 @@ static void ReadSettings() {   // from g_iniPath
     g_cfg.breastSize = GetPrivateProfileIntA("Collision", "bBreastSize", 1, g_iniPath) != 0;
     g_cfg.breastLift = GetPrivateProfileIntA("Collision", "bBreastLift", 1, g_iniPath) != 0;
     g_cfg.dents = GetPrivateProfileIntA("Dents", "bEnabled", 1, g_iniPath) != 0;
+    g_cfg.dentTilt = GetPrivateProfileIntA("Dents", "bTilt", 1, g_iniPath) != 0;
     {
         char b[64];
         GetPrivateProfileStringA("Dents", "fScale", "", b, sizeof(b), g_iniPath);
@@ -857,6 +859,10 @@ static std::atomic<std::uint64_t> g_lifts{0};       // breasts lifted over an ar
 static std::atomic<std::uint32_t> g_maxLiftMm{0};   // ... and the largest lift
 static std::atomic<std::uint64_t> g_dentSolves{0}, g_dentStill{0};   // regions solved, kept (nothing moved)
 static std::atomic<std::uint64_t> g_dentRuns{0}, g_dentDented{0}, g_dentTicks{0};   // body updates with a dent
+static std::atomic<std::uint32_t> g_dentTiltDeg{0};   // the largest dent bone tilt (0.1 deg)
+static std::atomic<std::uint64_t> g_dentChecked{0}, g_dentWhere{0}, g_dentAtRest{0};   // last frame's writes
+static std::atomic<std::uint32_t> g_dentGapUm{0};      // ... the largest gap from where written (0.01 mm)
+static std::atomic<std::uint64_t> g_dentTurnChecked{0}, g_dentTurnWhere{0}, g_dentTurnBack{0};   // ... and the turns
 static std::atomic<std::uint32_t> g_dentMaxMm{0}, g_dentBoneMm{0};                    // rig, dented ones, time; the deepest
 // the dent rig (DentRig.bin in the TFPhysics folder, written with the body by A-Body's abody_dent_rig.py)
 static dents::Rig g_dent;
@@ -1133,12 +1139,19 @@ static void MaybeLog() {
         if (g_dentOk) {
             const std::uint64_t runs = g_dentRuns.exchange(0), dentTicks = g_dentTicks.exchange(0);
             Log("   dents: %llu body updates with a dent rig (%.1f us each), %llu dented, the deepest %.1f cm (a dent bone "
-                "moved %.1f cm); regions solved %llu, kept as they were (nothing moved) %llu",
+                "moved %.1f cm, turned %.1f deg); regions solved %llu, kept as they were (nothing moved) %llu; last frame's "
+                "writes: %llu of %llu dent bones with a dent where written, %llu at their rest place (largest gap %.2f mm); "
+                "turns: %llu of %llu as written, %llu the other way round",
                 static_cast<unsigned long long>(runs),
                 runs ? static_cast<double>(dentTicks) * 1e6 / static_cast<double>(freq.QuadPart) / static_cast<double>(runs) : 0.0,
                 static_cast<unsigned long long>(g_dentDented.exchange(0)), g_dentMaxMm.exchange(0) / 10.0,
-                g_dentBoneMm.exchange(0) / 10.0, static_cast<unsigned long long>(g_dentSolves.exchange(0)),
-                static_cast<unsigned long long>(g_dentStill.exchange(0)));
+                g_dentBoneMm.exchange(0) / 10.0, g_dentTiltDeg.exchange(0) / 10.0,
+                static_cast<unsigned long long>(g_dentSolves.exchange(0)), static_cast<unsigned long long>(g_dentStill.exchange(0)),
+                static_cast<unsigned long long>(g_dentWhere.exchange(0)), static_cast<unsigned long long>(g_dentChecked.exchange(0)),
+                static_cast<unsigned long long>(g_dentAtRest.exchange(0)), g_dentGapUm.exchange(0) / 100.0,
+                static_cast<unsigned long long>(g_dentTurnWhere.exchange(0)),
+                static_cast<unsigned long long>(g_dentTurnChecked.exchange(0)),
+                static_cast<unsigned long long>(g_dentTurnBack.exchange(0)));
         }
         if (g_cfg.proxies)
             Log("   world proxies: A-Body updates with the proxy nodes %llu (both proxies in a world %llu, their C_Chest "
@@ -4580,7 +4593,9 @@ struct DentBody {
     void* com = nullptr;
     std::vector<void*> bone, dent, dentName;   // the rig's bones and dent bones (one list of every region's), names
     std::vector<float> last;                   // the dent each dent bone shows (m, along its inward line)
+    std::vector<float> lastW;                  // ... and its tilt (3 per dent bone, parent frame)
     std::vector<float> solved;                 // each dent bone's dent from its region's last solve
+    std::vector<float> solvedW;                // ... and its tilt
     std::vector<std::vector<dents::V3>> seen;  // per region: the bones it read at that solve (world positions)
     std::vector<float> seenMorph;              // ... and the sliders
     std::vector<std::uint8_t> written;
@@ -4631,7 +4646,9 @@ static void FindDentNodes(void* com, DentBody& d) {   // every node under COM, b
         for (const dents::DentBone& b : R.dent) carriers = carriers && d.bone[static_cast<size_t>(b.parent)];
     d.complete = found == g_dent.totalDent && carriers;
     d.last.assign(total, 0.0f);
+    d.lastW.assign(3 * total, 0.0f);
     d.solved.assign(total, 0.0f);
+    d.solvedW.assign(3 * total, 0.0f);
     d.seen.assign(g_dent.regions.size(), {});
     d.seenMorph.clear();
     d.written.assign(total, 0);
@@ -4654,6 +4671,84 @@ static dents::Xf ToDentXf(const Xf& x) {
     o.pos = {x.pos.x, x.pos.y, x.pos.z};
     o.scale = x.scale;
     return o;
+}
+
+// a node's local rotation (its axes in the parent's frame, the node's rows at +0x40) and translation, to the
+// node and the rig's copy (the slot's rows at +0x00, translation at +0x30), as the game's own setters write them
+static void WriteTurned(void* node, const dents::V3 ax[3], const float t[3]) {
+    char* n = static_cast<char*>(node);
+    for (int i = 0; i < 3; ++i) std::memcpy(n + 0x40 + 16 * i, &ax[i], 12);
+    std::memcpy(n + 0x70, t, 12);
+    void* rig = At<void*>(node, 0x20);
+    if (!rig) return;
+    _InterlockedIncrement(reinterpret_cast<volatile long*>(rig));
+    const std::uint64_t idx = g_rigFind(static_cast<char*>(rig) + 0x48, static_cast<char*>(node) + 0x10);
+    if (idx != At<std::uint64_t>(rig, 0x60)) {
+        const std::uint64_t value = *reinterpret_cast<std::uint64_t*>(At<char*>(rig, 0x58) + idx * 24 + 8);
+        const std::uint64_t slot = value & 0x3FF;
+        if (slot != 0x3FF) {
+            char* x = At<char*>(At<void*>(rig, 0x08), 0x10) + slot * 64;
+            for (int i = 0; i < 3; ++i) std::memcpy(x + 16 * i, &ax[i], 12);
+            std::memcpy(x + 0x30, t, 12);
+        }
+    }
+    g_rigRelease(rig);
+}
+
+// last frame's writes reached the skeleton when each dent bone with a dent sits where its parent's world x
+// the local written puts it (both worlds from the same compose: the game composes after this hook)
+[[maybe_unused]] static void CheckDentWrites(const DentBody& d) {
+    std::uint64_t checked = 0, where = 0, atRest = 0, turns = 0, turnWhere = 0, turnBack = 0;
+    float worst = 0;
+    for (size_t r = 0; r < g_dent.regions.size(); ++r) {
+        const dents::Region& R = g_dent.regions[r];
+        for (size_t j = 0; j < R.dent.size(); ++j) {
+            const size_t k = static_cast<size_t>(g_dentFirst[r]) + j;
+            const float x = d.last[k];
+            if (!d.written[k] || x < 0.002f) continue;
+            const dents::DentBone& db = R.dent[j];
+            Xf pw, dw;
+            if (!WorldOf(d.bone[static_cast<size_t>(db.parent)], pw) || !WorldOf(d.dent[k], dw)) continue;
+            const dents::Xf p = ToDentXf(pw);
+            const dents::V3 got{dw.pos.x, dw.pos.y, dw.pos.z};
+            const dents::V3 want = dents::Apply(p, dents::Add(db.rest, dents::Mul(db.inward, x)));
+            const float gap = dents::Len(dents::Sub(got, want));
+            ++checked;
+            if (gap < 0.001f) ++where;
+            else if (dents::Len(dents::Sub(got, dents::Apply(p, db.rest))) < 0.001f) ++atRest;
+            worst = std::fmax(worst, gap);
+            // its turn: the world axes its parent's axes and the local axes written give, or the reverse turn's
+            const float* w = &d.lastW[3 * k];
+            if (w[0] * w[0] + w[1] * w[1] + w[2] * w[2] < 0.035f * 0.035f) continue;   // under 2 degrees
+            const float back[3] = {-w[0], -w[1], -w[2]};
+            dents::V3 lw[3], lb[3];
+            dents::TiltAxes(w, lw);
+            dents::TiltAxes(back, lb);
+            float off = 0, offBack = 0;
+            for (int i = 0; i < 3; ++i) {
+                const dents::V3 a = dents::Add(dents::Add(dents::Mul(p.ax[0], lw[i].x), dents::Mul(p.ax[1], lw[i].y)),
+                                               dents::Mul(p.ax[2], lw[i].z));
+                const dents::V3 b2 = dents::Add(dents::Add(dents::Mul(p.ax[0], lb[i].x), dents::Mul(p.ax[1], lb[i].y)),
+                                                dents::Mul(p.ax[2], lb[i].z));
+                const dents::V3 g{dw.ax[i].x, dw.ax[i].y, dw.ax[i].z};
+                off = std::fmax(off, dents::Len(dents::Sub(g, a)));
+                offBack = std::fmax(offBack, dents::Len(dents::Sub(g, b2)));
+            }
+            ++turns;
+            if (off < 0.01f) ++turnWhere;
+            else if (offBack < 0.01f) ++turnBack;
+        }
+    }
+    if (!checked) return;
+    g_dentTurnChecked.fetch_add(turns, std::memory_order_relaxed);
+    g_dentTurnWhere.fetch_add(turnWhere, std::memory_order_relaxed);
+    g_dentTurnBack.fetch_add(turnBack, std::memory_order_relaxed);
+    g_dentChecked.fetch_add(checked, std::memory_order_relaxed);
+    g_dentWhere.fetch_add(where, std::memory_order_relaxed);
+    g_dentAtRest.fetch_add(atRest, std::memory_order_relaxed);
+    const std::uint32_t um = static_cast<std::uint32_t>(std::fmin(worst * 1e5f, 4e9f));
+    std::uint32_t prev = g_dentGapUm.load(std::memory_order_relaxed);
+    while (um > prev && !g_dentGapUm.compare_exchange_weak(prev, um)) {}
 }
 
 static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], const Vec3 push[kNumSoft],
@@ -4690,6 +4785,7 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
         d->retryMs = now + 2000;
         if (!d->complete) return;
     }
+    if constexpr (kDiag) CheckDentWrites(*d);
     // the bones' world transforms; the soft bones where this frame's springs and pushes put them
     static thread_local std::vector<dents::Xf> world;
     static thread_local std::vector<std::uint8_t> hv;
@@ -4715,7 +4811,8 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
         }
     }
     static thread_local dents::Work wk;
-    static thread_local std::vector<float> D;
+    static thread_local std::vector<float> D, Wv;
+    float tiltMax = 0.0f;
     const float dt = *reinterpret_cast<const float*>(g_addr[kFrameTime]);
     const float a = (dt > 0.0f && dt < 0.5f && g_cfg.dentRelax > 0.0f) ? 1.0f - std::exp(-dt / g_cfg.dentRelax) : 1.0f;
     bool dented = false;
@@ -4726,6 +4823,7 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
     for (size_t r = 0; r < g_dent.regions.size(); ++r) {
         const dents::Region& R = g_dent.regions[r];
         D.resize(R.dent.size());
+        Wv.assign(3 * R.dent.size(), 0.0f);
         const int first = g_dentFirst[r];
         // still since its last solve: the same dents
         const std::vector<int>& reads = g_dentReads[r];
@@ -4738,30 +4836,58 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
                     std::fabs(p.z - seen[q].z) < kDentStill;
         }
         if (still) {
-            for (size_t j = 0; j < R.dent.size(); ++j) D[j] = d->solved[static_cast<size_t>(first) + j];
+            for (size_t j = 0; j < R.dent.size(); ++j) {
+                D[j] = d->solved[static_cast<size_t>(first) + j];
+                for (size_t c = 0; c < 3; ++c) Wv[3 * j + c] = d->solvedW[3 * (static_cast<size_t>(first) + j) + c];
+            }
             g_dentStill.fetch_add(1, std::memory_order_relaxed);
         } else {
             dents::RegionStats st;
-            dents::SolveRegion(g_dent, R, world.data(), hv.data(), v.dentMorph, g_cfg.dentScale, actorScale, D.data(), &st, wk);
+            dents::SolveRegion(g_dent, R, world.data(), hv.data(), v.dentMorph, g_cfg.dentScale, actorScale, D.data(), &st, wk,
+                               Wv.data(), g_cfg.dentTilt);
             if (st.contacts) deepest = std::fmax(deepest, st.dent);
+            tiltMax = std::fmax(tiltMax, st.tilt);
             seen.resize(reads.size());
             for (size_t q = 0; q < reads.size(); ++q) {
                 const size_t i = static_cast<size_t>(reads[q]);
                 seen[q] = hv[i] ? world[i].pos : dents::V3{1e9f, 1e9f, 1e9f};
             }
-            for (size_t j = 0; j < R.dent.size(); ++j) d->solved[static_cast<size_t>(first) + j] = D[j];
+            for (size_t j = 0; j < R.dent.size(); ++j) {
+                d->solved[static_cast<size_t>(first) + j] = D[j];
+                for (size_t c = 0; c < 3; ++c) d->solvedW[3 * (static_cast<size_t>(first) + j) + c] = Wv[3 * j + c];
+            }
             g_dentSolves.fetch_add(1, std::memory_order_relaxed);
         }
+        const bool turns = g_cfg.dentTilt && (R.flags & 1);
         for (size_t j = 0; j < R.dent.size(); ++j) {
             const size_t k = static_cast<size_t>(first) + j;
             float x = d->last[k] + (D[j] - d->last[k]) * a;
             if (D[j] == 0.0f && x < 1e-4f) x = 0.0f;
             d->last[k] = x;
-            if (x > 0.0f || d->written[k]) {
+            float* lw = &d->lastW[3 * k];
+            float tw = 0.0f, tl = 0.0f;
+            for (size_t c = 0; c < 3; ++c) {
+                lw[c] += (Wv[3 * j + c] - lw[c]) * a;
+                tw += Wv[3 * j + c] * Wv[3 * j + c];
+                tl += lw[c] * lw[c];
+            }
+            if (tw == 0.0f && tl < 1e-8f) {
+                lw[0] = lw[1] = lw[2] = 0.0f;
+                tl = 0.0f;
+            }
+            if (x > 0.0f || tl > 0.0f || d->written[k]) {
                 const dents::DentBone& db = R.dent[j];
                 const float t[3] = {db.rest.x + db.inward.x * x, db.rest.y + db.inward.y * x, db.rest.z + db.inward.z * x};
-                if (!g_cfg.measureOnly) WriteTranslation(d->dent[k], t);
-                d->written[k] = x > 0.0f;
+                if (!g_cfg.measureOnly) {
+                    if (turns) {
+                        dents::V3 ax[3];
+                        dents::TiltAxes(lw, ax);
+                        WriteTurned(d->dent[k], ax, t);
+                    } else {
+                        WriteTranslation(d->dent[k], t);
+                    }
+                }
+                d->written[k] = x > 0.0f || tl > 0.0f;
             }
             if (x > 0.0f) dented = true;
             most = std::fmax(most, x);
@@ -4776,6 +4902,11 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
     };
     keepMax(g_dentMaxMm, deepest);
     keepMax(g_dentBoneMm, most);
+    {
+        const std::uint32_t dd = static_cast<std::uint32_t>(tiltMax * 572.9578f);   // 0.1 deg
+        std::uint32_t prev = g_dentTiltDeg.load(std::memory_order_relaxed);
+        while (dd > prev && !g_dentTiltDeg.compare_exchange_weak(prev, dd)) {}
+    }
     QueryPerformanceCounter(&t1);
     g_dentTicks.fetch_add(static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
 }
@@ -5552,7 +5683,8 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     Log("other bodies push at most %.1f cm; dead bodies %d (a dead body lying still: its shapes used up to %.0f ms old)",
         g_cfg.maxPushOther * 100, g_cfg.deadBodies, g_cfg.deadMaxAge * 1000);
     LoadDentRig();
-    Log("dents %d: depth x%.2f, a dent follows its contact within %.0f ms", g_cfg.dents, g_cfg.dentScale, g_cfg.dentRelax * 1000);
+    Log("dents %d: depth x%.2f, a dent follows its contact within %.0f ms; the dents tilt %d", g_cfg.dents, g_cfg.dentScale,
+        g_cfg.dentRelax * 1000, g_cfg.dentTilt);
     Log("body shape %d: jiggle x(1 %+.2f thin %+.2f muscular %+.2f heavy), gravity x(1 %+.2f thin %+.2f muscular %+.2f "
         "heavy), belly heavy x%.2f; parts: butt %.2f, hips %.2f, thighs %.2f, calves %.2f, arms %.2f, waist %.2f; damping "
         "follows %.2f; each factor %.2f to %.2f; override jiggle %.2f, gravity %.2f; breast stretch guard %d", g_cfg.shape,

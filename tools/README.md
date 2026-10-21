@@ -72,7 +72,7 @@ of this package:
 |---|---|---|
 | `ABODY_TOOLS` | A-Body's Python build tools: `v06.py`, `p3_collision.py`, `p3_physics.py`, `p3_spring_envelope.py`, `p3_spring_sim.py`, `poses.py`, and what they import | every script but `gen_body_shape_data.py` and `dent_model.py` |
 | `ABODY_AUDIT` | A-Body's build tree, with the physics preset and jiggle tables | `gen_body_shape_data.py`, `gen_preset_data.py` |
-| `ABODY_BUILDS` | A-Body's builds folder, with its two dent rigs (`A-Body_DentRig_A`, `A-Body_DentRig_B`) | `tests\export_dent_cases.py` (or the two rig folders as its arguments) |
+| `ABODY_BUILDS` | A-Body's builds folder, with its three dent rigs (`A-Body_DentRig_A`, `_B`, `_C`) | `tests\export_dent_cases.py` (or the three rig folders as its arguments) |
 
 `natural_rest.py` also reads `reports\phase3\physics\collision\sizes.json` from the build tree that A-Body's `v06.py`
 points at. They need Python 3 with numpy (A-Body's tools also need scipy), and each one takes a second or two.
@@ -191,17 +191,20 @@ arms_crossed   218 nodes, largest designed push 5.00 cm
 
 ### dent_model.py
 
-The dents' design model, in numpy: `load()` reads a `DentRig.bin`, and `solve_region()` runs one region's solve on
-the bones' world transforms with the same steps as `src\dents_core.h`. `dent_test` holds the plugin to it through
-the cases `export_dent_cases.py` writes. It needs only numpy.
+The dents' design model, in numpy: `load()` reads a `DentRig.bin` (version 1 or 2), and `solve_region()` /
+`solve_region2()` run one region's solve on the bones' world transforms with the same steps as
+`src\dents_core.h` (the second also returns the tilts); `box_qp()` is the version 2 fit's exact solve,
+`tilt_matrix()` a tilt's turn, and `dent_world()` places the dent bones with their moves and turns. `dent_test`
+holds the plugin to it through the cases `export_dent_cases.py` writes. It needs only numpy.
 
 ### ..\tests\export_dent_cases.py: tests\cases_dent\*.txt
 
-Copies A-Body's two dent rigs to `tests\data\`, and for each rig takes nine of the poses `export_collision_cases.py`
+Copies A-Body's three dent rigs to `tests\data\`, and for each rig takes nine of the poses `export_collision_cases.py`
 makes (`rest`, `arms_crossed`, `arms_forward`, `hands_on_glutes`, `hands_on_glutes_firm`, `sitting`, `folded`,
 `clasped`, `across`), moves each soft bone and everything under it by the design's push, and writes what
 `dent_test.cpp` checks: per pose, at the base sliders and with the breast, butt and thigh sliders at 0.5, every rig
-bone's world transform and the dent bones' moves the model gives. It prints each case's contacts and deepest dent.
+bone's world transform and the dent bones' moves (and on rig C their tilts) the model gives. It prints each case's
+contacts and deepest dent.
 
 ### gen_body_shape_data.py: src\body_shape_data.h
 

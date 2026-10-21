@@ -35,7 +35,8 @@ match, it patches nothing and says why in its log.
   - arms and hands below a breast lift it, its skin over tight shapes of the forearm, the palm and every finger joint;
   - a breast's collision shape follows its size sliders.
 - Dents: on a body with dent bones, an arm, a hand or a leg still pressing into a breast, a glute or a thigh dents
-  its skin. With nothing pressing, the skin moves as before.
+  its skin, and the dent bones turn with the dent so its lighting shows. With nothing pressing, the skin moves as
+  before.
 - World collision (logging build only): two Havok proxy bodies per A-Body body, steered to the breasts every frame.
   They collide with nothing yet. See [docs/WORLD_COLLISION.md](docs/WORLD_COLLISION.md).
 
@@ -84,7 +85,8 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
     installed springs bit for bit, the multipliers, characters, outfits, the planet, the files read again;
   - the breast gravity levels: the installed one held at its largest levels, one for every body and one per shape,
     the spring gravity of every part and the other parts' gravity shapes;
-  - the dents against their design model, on A-Body's two dent rigs (50 and 156 dent bones);
+  - the dents against their design model, on A-Body's three dent rigs (50, 156 and 160 dent bones; the last one
+    on every bone the breast skin hangs on, with turning dents);
   - the Address Library reader, and every start-up check on a fake game image.
 
   If it finds the game (through `STARFIELD_DIR`, or the usual Steam folders), it also runs the checks on the real
@@ -106,7 +108,7 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
 | Folder | What's in it |
 |---|---|
 | `src\` | `plugin.cpp`, `dents_core.h` (the dents' file reader and solve, no game types), and four generated data headers: collision sizes, the breast lift's skin samples, body-shape limits and the physics presets' springs. |
-| `tests\` | The offline tests, A-Body's skeleton in 13 poses (`tests\cases\`), A-Body's two dent rigs (`tests\data\`) in nine of them (`tests\cases_dent\`), and the scripts that run them. |
+| `tests\` | The offline tests, A-Body's skeleton in 13 poses (`tests\cases\`), A-Body's three dent rigs (`tests\data\`) in nine of them (`tests\cases_dent\`), and the scripts that run them. |
 | `config\` | The logging build's INI, and A-Body 1.5's release INIs (Fixed and Variable presets). |
 | `docs\` | The design rules, how it works, the engine notes, the body requirements, the tuning files and world collision. `docs\research\` holds the game facts behind them, with the hard risks. |
 | `tools\` | `vcvars.bat` for the scripts, `package_build.py`, `re\` (read-only tools for `Starfield.exe`), and the scripts that measured the data headers (they need A-Body's own build tools). See `tools\README.md`. |
@@ -140,8 +142,9 @@ game structures behind them.
   - world collision: items, push-back, NPCs;
   - a data-driven body definition, so other bodies can use TF Physics. For example, ones built on SF Extended
     Skeleton.
-- **Known limits:** a dent moves only the skin its dent bones carry, so a forearm pressed hard into a breast (crossed
-  arms) still goes in by up to about 1 cm; sitting doesn't move the belly, and deep squats are only partly handled.
+- **Known limits:** a dent goes at most the rig's depth (2 cm on A-Body's breasts: skin pushed deeper folds), so a
+  hand pressed deeper into a breast still goes in; sitting doesn't move the belly, and deep squats are only partly
+  handled.
 
 ## Thanks
 

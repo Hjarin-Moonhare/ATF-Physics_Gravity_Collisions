@@ -17,6 +17,17 @@ only by its own offset.  Per region, each frame:
      within [0, D_MAX] (projected Gauss-Seidel, at most SWEEPS, until no move changes by SETTLED); then a sample dented
      more than its wanted dent + 2 mm weighs x4, a contact left short by more than 1 mm x2, and again (ROUNDS);
   6. each dent bone's local translation = its rest + D x its inward line (parent frame).
+
+A version 2 rig (TFDENT02) adds per region, as its flags say:
+  - one shared field (flag 2): the unknowns are the values F of FIELD control points (samples of the region); a dent
+    bone's move is D = Pm F (Pm: the points' Wendland bumps of the bone's rest distance, radius from the file,
+    normalised), smoothed over the field's edges; each round solves its fit exactly (box_qp: the primal active-set
+    method, F in [0, D_MAX], warm-started from the round before); the guard settings come from the file;
+  - tilt (flag 1, with the field): a dent bone also turns by the slope of the dent around it, omega = g x i (g the
+    gradient of its lattice neighbours' moves in its tangent plane at rest, i its inward line, both in mesh space), so
+    the skin's normals follow the dent; the fit includes what the turn moves (G + Grot, Grot[s] = sum_k -c_sk in_s .
+    [u_sk]x Omega_k, u_sk = sample - bone at rest); the turn's angle is atan |omega|, about omega, in the parent's
+    frame (the parent's mesh-to-bone rotation x omega).
 """
 import struct
 
@@ -27,6 +38,8 @@ ROUNDS = 4
 SETTLED = 1e-7      # a sweep that changes no move by more than this (m) ends the sweeps
 BISECT = 18
 NEIGHBOUR = 0.015   # samples closer than this are neighbours for the smoothing
+TILT_RIDGE = 1e-6   # m^2, on a dent bone's gradient fit
+V1_GUARD = dict(over_t=0.002, over_w=4.0, short_t=0.001, short_w=2.0, rounds=4)
 
 
 def _str(b, o):
@@ -39,11 +52,80 @@ def wendland(x):
     return (1 - x) ** 4 * (4 * x + 1)
 
 
+def skew(a):
+    return np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+
+
+def tilt_matrix(w):
+    """The turn of a tilt vector: angle atan |w| about w."""
+    th = float(np.linalg.norm(w))
+    if th < 1e-12:
+        return np.eye(3)
+    K_ = skew(w / th)
+    a = np.arctan(th)
+    return np.eye(3) + np.sin(a) * K_ + (1 - np.cos(a)) * K_ @ K_
+
+
+def _field_and_tilt(rig, R):
+    """A version 2 region's shared field (Pm, its Laplacian) and tilt (Omega, the parents' rotations, Grot)."""
+    nd = len(R["dent"])
+    P, I, Srot = np.zeros((nd, 3)), np.zeros((nd, 3)), np.zeros((nd, 3, 3))
+    for k, dd in enumerate(R["dent"]):
+        S = rig["binds"][dd["parent"]]
+        Si = np.linalg.inv(S)
+        P[k] = (Si @ np.append(dd["rest"], 1.0))[:3]
+        v = Si[:3, :3] @ dd["inward"]
+        I[k] = v / max(np.linalg.norm(v), 1e-12)
+        Srot[k] = S[:3, :3] / np.cbrt(abs(np.linalg.det(S[:3, :3])))
+    R.update(dent_P=P, dent_I=I, dent_Srot=Srot)
+    if R["rflags"] & 2:
+        q = R["P"][R["field"]]
+        Wb = wendland(np.linalg.norm(P[:, None] - q[None], axis=2) / R["field_radius"])
+        zero = Wb.sum(1) <= 0
+        Wb[zero, np.argmin(np.linalg.norm(P[zero, None] - q[None], axis=2), 1)] = 1.0
+        R["field_P"] = Wb / Wb.sum(1, keepdims=True)
+        L = np.zeros((len(q), len(q)))
+        for a, c, w in R["field_edges"]:
+            L[a, a] += w
+            L[c, c] += w
+            L[a, c] -= w
+            L[c, a] -= w
+        R["field_L"] = L
+    if R["rflags"] & 1:
+        nbr = [[] for _ in range(nd)]
+        for a, c, _w in R["edges"]:
+            nbr[a].append(c)
+            nbr[c].append(a)
+        Om = np.zeros((nd, 3, nd))
+        for k in range(nd):
+            n = I[k]
+            t1 = np.cross(n, [0.0, 0.0, 1.0] if abs(n[2]) < 0.9 else [1.0, 0.0, 0.0])
+            t1 /= np.linalg.norm(t1)
+            T2 = np.stack([t1, np.cross(n, t1)], 1)
+            nb = nbr[k]
+            if len(nb) < 2:
+                continue
+            U = (P[nb] - P[k]) @ T2
+            G3 = T2 @ np.linalg.solve(U.T @ U + TILT_RIDGE * np.eye(2), U.T)   # gradient (mesh) per neighbour move
+            Gg = np.zeros((3, nd))
+            for col, m in enumerate(nb):
+                Gg[:, m] += G3[:, col]
+                Gg[:, k] -= G3[:, col]
+            Om[k] = -skew(n) @ Gg
+        Ns = R["N"] / np.maximum(np.linalg.norm(R["N"], axis=1, keepdims=True), 1e-12)
+        Grot = np.zeros((len(R["P"]), nd))
+        for si in range(len(R["P"])):
+            for k in np.flatnonzero(R["C"][si] > 0):
+                Grot[si] += -R["C"][si, k] * ((-Ns[si]) @ skew(R["P"][si] - P[k]) @ Om[k])
+        R.update(Om=Om, Grot=Grot)
+
+
 def load(path):
     b = open(path, "rb").read()
-    assert b[:8] == b"TFDENT01", "not a dent rig file"
+    assert b[:8] in (b"TFDENT01", b"TFDENT02"), "not a dent rig file"
+    version = 1 if b[:8] == b"TFDENT01" else 2
     o = 8
-    rig = {"bones": [], "binds": {}, "morphs": [], "colliders": [], "regions": []}
+    rig = {"bones": [], "binds": {}, "morphs": [], "colliders": [], "regions": [], "version": version}
     nb = struct.unpack_from("<I", b, o)[0]
     o += 4
     for _ in range(nb):
@@ -81,7 +163,23 @@ def load(path):
         margin, e_max, fall, d_max, lam_s, tsm, top = struct.unpack_from("<fffffIf", b, o)
         o += struct.calcsize("<fffffIf")
         R = dict(name=name, kind=kind, side=chr(side), margin=margin, e_max=e_max, fall=fall, d_max=d_max, lam_s=lam_s,
-                 tsm=tsm, dent=[], edges=[], samples=[], use=[])
+                 tsm=tsm, dent=[], edges=[], samples=[], use=[], rflags=0, guard=dict(V1_GUARD))
+        if version == 2:
+            flags, ot, ow, st, sw, rounds = struct.unpack_from("<IffffI", b, o)
+            o += struct.calcsize("<IffffI")
+            assert not (flags & 1) or (flags & 2), "a tilting region needs the shared field"
+            R.update(rflags=flags, guard=dict(over_t=ot, over_w=ow, short_t=st, short_w=sw, rounds=rounds))
+            if flags & 2:
+                nf = struct.unpack_from("<I", b, o)[0]
+                o += 4
+                R["field"] = list(struct.unpack_from(f"<{nf}H", b, o))
+                o += 2 * nf
+                R["field_radius"] = struct.unpack_from("<f", b, o)[0]
+                o += 4
+                nfe = struct.unpack_from("<I", b, o)[0]
+                o += 4
+                R["field_edges"] = [struct.unpack_from("<HHf", b, o + 8 * i) for i in range(nfe)]
+                o += 8 * nfe
         nd = struct.unpack_from("<I", b, o)[0]
         o += 4
         for _ in range(nd):
@@ -137,6 +235,8 @@ def load(path):
         R["Lap"] = Lap
         d = np.linalg.norm(R["P"][:, None, :] - R["P"][None, :, :], axis=2)
         R["nbr"] = [np.flatnonzero((d[k] < NEIGHBOUR) & (np.arange(ns) != k)) for k in range(ns)]
+        if R["rflags"]:
+            _field_and_tilt(rig, R)
         rig["regions"].append(R)
     assert o == len(b), (o, len(b))
     return rig
@@ -200,17 +300,23 @@ def place(rig, R, world, morph):
 
 def solve_region(rig, R, world, morph, scale=1.0, stats=None):
     """The dent bones' inward moves D (m) for one region; scale: the dents' size (e_max and d_max)."""
+    return solve_region2(rig, R, world, morph, scale, stats)[0]
+
+
+def solve_region2(rig, R, world, morph, scale=1.0, stats=None):
+    """D and the dent bones' tilt vectors in their parents' frames (nd x 3; zeros when the region doesn't tilt)."""
     nd = len(R["dent"])
     D = np.zeros(nd)
+    W0 = np.zeros((nd, 3))
     segs = [collider_segments(rig, world)[i] for i in R["use"]] if R["use"] else []
     if not segs:
-        return D
+        return D, W0
     X, Nw = place(rig, R, world, morph)
     lo, hi = X.min(0), X.max(0)
     near = [s for s in segs if not ((np.minimum(s[0], s[1]) - s[2] - R["margin"] > hi).any() or
                                     (np.maximum(s[0], s[1]) + s[2] + R["margin"] < lo).any())]
     if not near:
-        return D
+        return D, W0
     e_max = R["e_max"] * scale
     e = np.zeros(len(X))
     ok = (R["flags"] & 1 == 0) & (R["share"] >= 0.05)
@@ -233,7 +339,7 @@ def solve_region(rig, R, world, morph, scale=1.0, stats=None):
     if stats is not None:
         stats["contacts"] = int(len(con))
     if not len(con):
-        return D
+        return D, W0
     t = np.zeros(len(X))
     for c in con:
         d = np.linalg.norm(X - X[c], axis=1)
@@ -247,6 +353,8 @@ def solve_region(rig, R, world, morph, scale=1.0, stats=None):
     nj = np.array([world[dd["parent"]][:3, :3] @ dd["inward"] for dd in R["dent"]])
     nj /= np.maximum(np.linalg.norm(nj, axis=1, keepdims=True), 1e-12)
     G = R["C"] * (-(Nw @ nj.T))   # a dent bone's inward move, along the sample's inward normal
+    if R["rflags"] & 2:
+        return _fit_field(R, G, e, con, t, scale, stats)
     # the dent bones that take part: under the wanted dent, and one ring of their lattice neighbours
     act = (R["C"][t > 0] > 0).any(0)
     act2 = act.copy()
@@ -291,27 +399,119 @@ def solve_region(rig, R, world, morph, scale=1.0, stats=None):
         stats.update(need_cm=round(float(e.max() * 100), 2), dent_cm=round(float(got_all.max() * 100), 2),
                      left_cm=round(float(np.maximum(e[con] - got_all[con], 0).max() * 100), 2),
                      bone_cm=round(float(D.max() * 100), 2))
-    return D
+    return D, W0
 
 
-def solve(rig, world, morph=None, scale=1.0):
-    """{dent bone name: local translation offset from its rest (parent frame, m)}, {region: stats}."""
+def box_qp(M, rhs, hi, F):
+    """min 1/2 F'MF - rhs'F with 0 <= F <= hi (M symmetric positive definite): the primal active-set method, each step
+    an exact solve on the free set (Cholesky); F is the warm start.  A step that would leave the box stops at the first
+    bound it meets (the lowest index on a tie) and fixes that one; at the free set's solution the fixed one with the
+    largest wrong-signed gradient (over 1e-9 x (1 + max |rhs|); the lowest index on a tie) is freed; at most 4n + 10
+    steps."""
+    n = len(rhs)
+    F = np.clip(np.asarray(F, float), 0.0, hi)
+    W = np.where(F <= 0.0, -1, np.where(F >= hi, 1, 0))
+    tol = 1e-9 * (1.0 + float(np.abs(rhs).max()))
+    for _ in range(4 * n + 10):
+        free = np.flatnonzero(W == 0)
+        fixed = np.flatnonzero(W != 0)
+        if len(free):
+            b = rhs[free] - M[np.ix_(free, fixed)] @ F[fixed]
+            L = np.linalg.cholesky(M[np.ix_(free, free)])
+            x = np.linalg.solve(L.T, np.linalg.solve(L, b))
+            if (x < 0).any() or (x > hi).any():
+                alpha, block, bound = 1.0, -1, 0
+                for idx, i in enumerate(free):
+                    d = x[idx] - F[i]
+                    if x[idx] < 0 and d < 0:
+                        a = -F[i] / d
+                        if a < alpha:
+                            alpha, block, bound = a, i, -1
+                    elif x[idx] > hi and d > 0:
+                        a = (hi - F[i]) / d
+                        if a < alpha:
+                            alpha, block, bound = a, i, 1
+                F[free] += alpha * (x - F[free])
+                if block >= 0:
+                    F[block] = 0.0 if bound < 0 else hi
+                    W[block] = bound
+                continue
+            F[free] = x
+        g = M @ F - rhs
+        worst, wv = -1, tol
+        for i in range(n):
+            if W[i] == -1 and -g[i] > wv:
+                worst, wv = i, -g[i]
+            elif W[i] == 1 and g[i] > wv:
+                worst, wv = i, g[i]
+        if worst < 0:
+            break
+        W[worst] = 0
+    return F
+
+
+def _fit_field(R, G, e, con, t, scale, stats):
+    """A version 2 region's fit: the shared field's values F (D = Pm F), the tilt in G when the region tilts."""
+    if R["rflags"] & 1:
+        G = G + R["Grot"]
+    Gm = G @ R["field_P"]
+    nf = Gm.shape[1]
+    fs = np.flatnonzero((np.abs(Gm) > 1e-9).any(1))
+    Ga = Gm[fs]
+    g = R["guard"]
+    w = np.ones(len(fs))
+    F = np.zeros(nf)
+    d_max = R["d_max"] * scale
+    tf = t[fs]
+    pos_in = {v: i for i, v in enumerate(fs)}
+    con_in = np.array([pos_in[c] for c in con if c in pos_in], int)
+    con_e = np.array([e[c] for c in con if c in pos_in])
+    for _ in range(g["rounds"]):
+        M = (Ga * w[:, None]).T @ Ga + R["lam_s"] * R["field_L"] + 1e-6 * np.eye(nf)
+        rhs = (Ga * w[:, None]).T @ tf
+        F = box_qp(M, rhs, d_max, F)
+        got = Ga @ F
+        over = np.flatnonzero(got > tf + g["over_t"])
+        short = con_in[got[con_in] < con_e - g["short_t"]]
+        if not len(over) and not len(short):
+            break
+        w[over] *= g["over_w"]
+        w[short] *= g["short_w"]
+    D = R["field_P"] @ F
+    om = np.einsum("kin,n->ki", R["Om"], D) if R["rflags"] & 1 else np.zeros((len(D), 3))
+    om_local = np.einsum("kij,kj->ki", R["dent_Srot"], om)
+    if stats is not None:
+        got_all = G @ D
+        stats.update(need_cm=round(float(e.max() * 100), 2), dent_cm=round(float(got_all.max() * 100), 2),
+                     left_cm=round(float(np.maximum(e[con] - got_all[con], 0).max() * 100), 2),
+                     bone_cm=round(float(D.max() * 100), 2),
+                     tilt_deg=round(float(np.degrees(np.arctan(np.linalg.norm(om, axis=1).max()))), 1))
+    return D, om_local
+
+
+def solve(rig, world, morph=None, scale=1.0, rots=None):
+    """{dent bone name: local translation offset from its rest (parent frame, m)}, {region: stats}; with a dict as
+    rots, also each dent bone's local turn (3x3, parent frame) into it."""
     out, st = {}, {}
     for R in rig["regions"]:
         s = {}
-        D = solve_region(rig, R, world, morph, scale, s)
+        D, W = solve_region2(rig, R, world, morph, scale, s)
         st[R["name"]] = s
-        for dd, d in zip(R["dent"], D):
+        for dd, d, w in zip(R["dent"], D, W):
             out[dd["name"]] = d * dd["inward"]
+            if rots is not None:
+                rots[dd["name"]] = tilt_matrix(w)
     return out, st
 
 
-def dent_world(rig, world, offsets):
-    """World transforms of the dent bones: parent world x (rest + offset)."""
+def dent_world(rig, world, offsets, rots=None):
+    """World transforms of the dent bones: parent world x (rest + offset, with its turn when rots has one)."""
     out = {}
     for R in rig["regions"]:
         for dd in R["dent"]:
             L = np.eye(4)
+            if rots is not None and dd["name"] in rots:
+                L[:3, :3] = rots[dd["name"]]
             L[:3, 3] = dd["rest"] + offsets.get(dd["name"], np.zeros(3))
             out[dd["name"]] = world[dd["parent"]] @ L
     return out

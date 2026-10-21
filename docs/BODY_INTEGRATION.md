@@ -87,8 +87,11 @@ A body can ship a dent rig; without one nothing changes.
   even with no contact (the spine under a breast: up to 8 mm in a bend).
 - A vertex has at most 8 weights. A skinned shape has at most 255 bones (the skinning shaders' limit); the game's own
   meshes use up to 143, and A-Body's body with 249 draws in game.
-- A-Body's rigs: a breast's dent bones ride on `C_Chest`, plus one on the nipple (on `L_Nipple` / `R_Nipple`); a
-  glute's on the hips; a thigh's on the strongest of the thigh, its twist bones and the hips at each point.
+- A-Body's version 1 rigs: a breast's dent bones ride on `C_Chest`, plus one on the nipple (on `L_Nipple` /
+  `R_Nipple`); a glute's on the hips; a thigh's on the strongest of the thigh, its twist bones and the hips at each
+  point. Its version 2 rig: a breast's on every bone its skin hangs on (`C_Chest`, the four `TF_Breast` bones, the
+  clavicle, `C_Spine2`; 79 a breast) plus the nipple's, each vertex's weight on each of them carved into that
+  bone's own dent bones.
 
 **`DentRig.bin`,** in `Data\SFSE\Plugins\TFPhysics\`, read at start-up by `dents::Load` (`src\dents_core.h`), which
 turns away a file cut short or with a wrong header. Little endian: counts are u32, bone and dent bone indexes u16 (a
@@ -101,14 +104,15 @@ and its bytes.
 | bones | count; per bone: name, has a bind (u8), then its mesh-to-bone transform (3x3 with scale, translation) |
 | sliders | count; per slider: its morph name, read from the NPC record like the other sliders |
 | shapes | count; per shape: name, side, kind (0 arm, 1 hand, 2 leg), bone A, bone B (-1: a tip along the line from the tip parent to A), tip parent, tip length, radius, start (a fraction of A to B) |
-| regions | count; per region: name, kind (0 breast, 1 glute, 2 thigh), side, margin, largest need, fall-off, largest dent bone move, smoothing weight, smoothing rounds, an unused height, then the four blocks below |
+| regions | count; per region: name, kind (0 breast, 1 glute, 2 thigh), side, margin, largest need, fall-off, largest dent bone move, smoothing weight, smoothing rounds, an unused height; in version 2 (`TFDENT02`) then its flags (1 tilt, 2 shared field; tilt needs the field), the guard (overshoot, its weight, shortfall, its weight, rounds) and with the field its control points (sample indices), their bumps' radius and their edges (two points, a weight); then the four blocks below |
 | dent bones | count; per bone: name, parent, rest translation and inward line (both in the parent's frame) |
 | edges | count; per edge: two dent bones and a weight (the smoothing lattice) |
 | samples | count; per sample: rest position and normal (mesh space), dent share, flags (1: never in contact), its skin weights (bone, weight), dent bone weights (dent bone, weight) and slider changes (slider, delta) |
 | shapes used | count; per shape: its index |
 
-`tests\data\DentRig_A.bin` (50 dent bones: 16 per breast, 5 per glute, 4 per thigh; 143 bones on the body) and
-`DentRig_B.bin` (156: 78 per breast; 249 bones) are A-Body's two rigs.
+`tests\data\DentRig_A.bin` (50 dent bones: 16 per breast, 5 per glute, 4 per thigh; 143 bones on the body),
+`DentRig_B.bin` (156: 78 per breast; 249 bones) and `DentRig_C.bin` (version 2, 160: 80 per breast on every bone
+their skin hangs on, 30 control points per breast, tilting; 253 bones) are A-Body's three rigs.
 
 ## World collision (test builds only)
 

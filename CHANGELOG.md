@@ -4,6 +4,14 @@ Releases are the builds A-Body ships.
 
 ## Development (this source)
 
+- **Dent rig version 2:** a region can dent all of the skin an arm presses, not one bone's share of it: dent bones
+  on every bone that skin hangs on, each moved by one shared field per region (control points on its skin with
+  Wendland bumps, smoothed over the field's edges). Each guard round's fit is solved exactly (the primal active-set
+  method on the box-bounded least squares), contacts cleared first, with the guard settings from the file. A dent
+  bone also turns with the slope of the dent around it, so the skin's lighting shows the dent; the fit includes
+  what the turn moves, and the turn is written with the translation (node and rig copy). `[Dents] bTilt` (on unless
+  set to 0). The log checks last frame's writes: each dent bone where its parent's world and the local written put
+  it, and each turn as written. Version 1 rigs work as before.
 - **Dents:** on a body that ships dent bones and a dent rig (`DentRig.bin` in `Data\SFSE\Plugins\TFPhysics\`),
   an arm, a hand or a leg still pressing into a breast, a glute or a thigh after the pushes dents its skin
   (`src\dents_core.h`). A dent bone rides on a bone of the body and carries that bone's skin weight in its region,

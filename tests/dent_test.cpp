@@ -1,7 +1,8 @@
 // Dents (src/dents_core.h) against the design model (tools/dent_model.py): each case in tests/cases_dent (written by
 // tests/export_dent_cases.py) holds a body's bones in a pose with the designed pushes and the dents the model gives;
-// the plugin's solve must give the same dent bone moves.  Also: a cut-short or wrong file is turned away, a missing
-// bone leaves its region undented, a dent never passes its largest move, and the time a solve takes.
+// the plugin's solve must give the same dent bone moves, and on a rig whose regions tilt the same tilts.  Also: a
+// cut-short or wrong file is turned away, a missing bone leaves its region undented, a dent never passes its largest
+// move, a tilt's turn is a rotation, and the time a solve takes.
 #include <windows.h>
 #include <algorithm>
 #include <chrono>
@@ -35,6 +36,7 @@ struct Case {
     std::vector<dents::Xf> world;
     std::vector<std::uint8_t> have;
     std::map<std::string, std::vector<float>> expect;
+    std::map<std::string, std::vector<float>> expectW;   // a tilting region's tilts (3 per dent bone)
 };
 
 static bool ReadCase(const char* path, size_t nBones, Case& c) {
@@ -73,6 +75,12 @@ static bool ReadCase(const char* path, size_t nBones, Case& c) {
             std::vector<float> d(n);
             for (float& x : d) x = static_cast<float>(atof(strtok_s(nullptr, " \r\n", &save)));
             c.expect[region] = d;
+        } else if (!strcmp(tok, "W")) {
+            const std::string region = strtok_s(nullptr, " \r\n", &save);
+            const int n = atoi(strtok_s(nullptr, " \r\n", &save));
+            std::vector<float> w(3 * static_cast<size_t>(n));
+            for (float& x : w) x = static_cast<float>(atof(strtok_s(nullptr, " \r\n", &save)));
+            c.expectW[region] = w;
         }
     }
     fclose(f);
@@ -86,7 +94,7 @@ int main() {
     strcat_s(g_tests, "\\tests");
     int fails = 0;
     std::map<std::string, dents::Rig> rigs;
-    for (const char* tag : {"A", "B"}) {
+    for (const char* tag : {"A", "B", "C"}) {
         char path[MAX_PATH];
         snprintf(path, sizeof(path), "%s\\data\\DentRig_%s.bin", g_tests, tag);
         std::vector<std::uint8_t> buf;
@@ -149,14 +157,15 @@ int main() {
         std::vector<float> morphW(rig.morphs.size(), 0.0f);
         for (size_t m = 0; m < rig.morphs.size(); ++m)
             if (c.morph.count(rig.morphs[m])) morphW[m] = c.morph[rig.morphs[m]];
-        float worst = 0, deepest = 0;
+        float worst = 0, worstW = 0, deepest = 0, tiltMax = 0;
         int contacts = 0;
-        bool shape = true;
+        bool shape = true, tilts = false;
         for (const dents::Region& R : rig.regions) {
-            std::vector<float> D(R.dent.size());
+            std::vector<float> D(R.dent.size()), W(3 * R.dent.size());
             dents::RegionStats st;
             const auto t0 = std::chrono::steady_clock::now();
-            dents::SolveRegion(rig, R, c.world.data(), c.have.data(), morphW.data(), 1.0f, c.scale, D.data(), &st, wk);
+            dents::SolveRegion(rig, R, c.world.data(), c.have.data(), morphW.data(), 1.0f, c.scale, D.data(), &st, wk,
+                               W.data());
             const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
             solveUs += us;
             ++solves;
@@ -166,21 +175,57 @@ int main() {
             }
             contacts += st.contacts;
             deepest = std::fmax(deepest, st.dent);
+            tiltMax = std::fmax(tiltMax, st.tilt);
             const auto it = c.expect.find(R.name);
             if (it == c.expect.end() || it->second.size() != D.size()) {
                 shape = false;
                 continue;
             }
             for (size_t j = 0; j < D.size(); ++j) worst = std::fmax(worst, std::fabs(D[j] - it->second[j]));
+            if (R.flags & 1) {   // a tilting region: its tilts too
+                tilts = true;
+                const auto iw = c.expectW.find(R.name);
+                if (iw == c.expectW.end() || iw->second.size() != W.size()) {
+                    shape = false;
+                    continue;
+                }
+                for (size_t j = 0; j < W.size(); ++j) worstW = std::fmax(worstW, std::fabs(W[j] - iw->second[j]));
+            }
         }
-        const bool ok = shape && worst < 0.0005f;
-        printf("%-34s %4d skin samples in contact, deepest dent %.2f cm, worst difference %.3f mm  %s\n", name.c_str(),
-               contacts, deepest * 100, worst * 1000, ok ? "OK" : "FAIL");
+        const bool ok = shape && worst < 0.0005f && worstW < 0.005f;
+        if (tilts)
+            printf("%-34s %4d skin samples in contact, deepest dent %.2f cm, worst difference %.3f mm; tilt up to %.1f deg, "
+                   "worst difference %.4f  %s\n", name.c_str(), contacts, deepest * 100, worst * 1000,
+                   tiltMax * 57.29578f, worstW, ok ? "OK" : "FAIL");
+        else
+            printf("%-34s %4d skin samples in contact, deepest dent %.2f cm, worst difference %.3f mm  %s\n", name.c_str(),
+                   contacts, deepest * 100, worst * 1000, ok ? "OK" : "FAIL");
         fails += !ok;
     }
     if (names.empty()) {
         printf("%-34s no cases (python tests\\export_dent_cases.py)  FAIL\n", "cases");
         ++fails;
+    }
+    // a tilt's turn: three orthonormal axes, right-handed, and to first order I + [w]x
+    {
+        const float ws[3][3] = {{0.3f, -0.2f, 0.1f}, {0.0f, 0.0f, 0.9f}, {1e-3f, 0.0f, 0.0f}};
+        float off = 0, firstOrder = 0;
+        for (const auto& w : ws) {
+            dents::V3 ax[3];
+            dents::TiltAxes(w, ax);
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) off = std::fmax(off, std::fabs(dents::Dot(ax[i], ax[j]) - (i == j ? 1.0f : 0.0f)));
+            const dents::V3 c = {ax[0].y * ax[1].z - ax[0].z * ax[1].y, ax[0].z * ax[1].x - ax[0].x * ax[1].z,
+                                 ax[0].x * ax[1].y - ax[0].y * ax[1].x};
+            off = std::fmax(off, dents::Len(dents::Sub(c, ax[2])));
+        }
+        dents::V3 ax[3];
+        dents::TiltAxes(ws[2], ax);
+        firstOrder = dents::Len(dents::Sub(ax[1], dents::V3{0.0f, 1.0f, ws[2][0]}));
+        const bool okT = off < 1e-5f && firstOrder < 1e-5f;
+        printf("%-34s off a rotation by %.1e, a small tilt off I + [w]x by %.1e  %s\n", "tilt turn", off, firstOrder,
+               okT ? "OK" : "FAIL");
+        fails += !okT;
     }
     // a missing bone (a dent bone's parent) leaves its region undented; the depth setting scales the dents; a dent
     // bone never moves past its largest move
