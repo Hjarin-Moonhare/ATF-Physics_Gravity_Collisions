@@ -9,6 +9,17 @@ Releases are the builds A-Body ships.
   A level's swing no longer moves the damping.
 - **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
 - **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
+- **Breasts lifted over the arms below them:** crossed arms, a hand underneath. Each breast's skin (`lift_data.h`:
+  samples of A-Body's breast skin in `C_Chest`'s frame, with what the breast sliders and the body triangle do to
+  them) sits where the chest, the Pecs anchor and the four `TF_Breast` bones put it each frame. A sample inside a
+  forearm, a palm bone or a finger or thumb joint (tight shapes, 95% of the skin inside, + 3 mm) with the limb below
+  it needs the lift that takes it out over the limb; a forearm, or an upper arm within ~20 degrees of level, above
+  a sample caps its rise (0 when it presses on it from above). The four bones' lifts are the least ones that meet
+  every need and cap (80 rounds of projections), within the breast's cap and spread; a lifted bone's vertical push is
+  its lift, never below its own rise. Only when a forearm or a hand comes within 25 cm of a breast.
+  `[Collision] bBreastLift` (on unless set to 0).
+- **Breast size in the collisions:** a breast's collision sphere, cap and spread x 1 + 0.5 Large - 0.5 Small (0.5 to
+  1.6). `[Collision] bBreastSize` (on unless set to 0). `TF_BreastsPerky` and `TF_BreastsApart` are read too.
 - **A part pushed as one soft mass:** the collision pushes of the soft bones of a breast, the belly, a glute and an
   inner thigh are coupled. No two of a part's pushes differ by more than the furthest one bone moves alone with the
   skin smooth, no hard crease and no sharp edge (`kGroupPushSpread`: breast 2 cm, belly 4, inner thigh 5, glute 3.5).

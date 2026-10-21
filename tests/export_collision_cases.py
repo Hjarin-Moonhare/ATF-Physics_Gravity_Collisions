@@ -18,12 +18,19 @@ from p3_spring_envelope import SKEL  # noqa: E402
 
 SCALE = 1.1
 POSES = ("rest", "arms_forward", "arms_crossed", "sitting", "deep_squat", "sprint_stride", "arms_sides", "arms_hanging",
-         "hands_on_glutes", "hands_on_glutes_firm")
+         "hands_on_glutes", "hands_on_glutes_firm", "folded", "clasped", "across")
+# photo-mode poses saved as rotations (tests/clip_study/poses, read from a pose mod's .af files by af_pose.py), when here
+POSE_FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clip_study", "poses")
+MOD_POSES = tuple(n for n in ("armcrossed_pose", "finger_pose", "choked_pose")
+                  if os.path.exists(os.path.join(POSE_FILES, n + ".json")))
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases")
 os.makedirs(OUT, exist_ok=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import natural_rest  # noqa: E402
+import lift_model  # noqa: E402   the breasts lifted over the arms below them, as the plugin's LiftBreasts does
+import arm_poses  # noqa: E402
 
 sizes, rest_d = natural_rest.rest_distances()   # the same distances as the plugin's header
 SOFT, CAP = natural_rest.SOFT, natural_rest.MAX_PUSH   # p3_collision's groups + the glutes, and their caps
@@ -62,7 +69,7 @@ def pushes(world):
                     total += (c - P) / d * (contact - d) * 0.5
         L = np.linalg.norm(total)
         out[n] = total * (CAP[g] / L) if L > CAP[g] else total
-    return couple(out)
+    return lift_model.lift(world, couple(out), {}, size=1.0, cap=CAP["breast"], spread=natural_rest.PUSH_SPREAD["breast"])
 
 
 def couple(out):
@@ -114,8 +121,15 @@ P["arms_hanging"] = [op for s in "LR" for op in (
     v06.toward(skel, f"{s}_Forearm", f"{s}_Wrist", (0, 1, 0), 10))]
 P["hands_on_glutes"] = natural_rest.hands_on_glutes(skel, base, 30, 20)        # the glute group
 P["hands_on_glutes_firm"] = natural_rest.hands_on_glutes(skel, base, 30, 28)
-for pname in POSES:
-    world = base if pname == "rest" else v06.pose(skel, P[pname], base)
+ARMS = arm_poses.three(skel, base)
+for pname in POSES + MOD_POSES:
+    if pname in MOD_POSES:
+        import af_pose  # noqa: E402
+        world = af_pose.apply_rotations(skel, base, json.load(open(os.path.join(POSE_FILES, pname + ".json")))["rotations_xyzw"])
+    elif pname in ARMS:
+        world = ARMS[pname]
+    else:
+        world = base if pname == "rest" else v06.pose(skel, P[pname], base)
     lines = []
     for name in world:
         W = world[name]

@@ -225,7 +225,7 @@ int main() {
     std::atomic<bool> stop{false};
     std::atomic<long long> frames{0};
     std::vector<std::thread> pool;
-    const std::uint64_t readable0 = g_readableCalls.load(), vq0 = g_vqCalls.load();
+    const std::uint64_t readable0 = g_readableCalls.load(), vq0 = g_vqTotal.load();
     for (int t = 0; t < kThreads; ++t)
         pool.emplace_back([&, t] {
             long long n = 0;
@@ -239,7 +239,7 @@ int main() {
     Report("threads", frames.load() > 1000, d);
     // an A-Body body's update (body read, sizes every 2 s, springs, gravity, shape, collisions) asks no memory
     // check of Windows' kind (one can take milliseconds)
-    const std::uint64_t readable = g_readableCalls.load() - readable0, vq = g_vqCalls.load() - vq0;
+    const std::uint64_t readable = g_readableCalls.load() - readable0, vq = g_vqTotal.load() - vq0;
     snprintf(d, sizeof(d), "%llu memory checks (%llu asked Windows) in %lld body-updates", static_cast<unsigned long long>(readable),
              static_cast<unsigned long long>(vq), frames.load());
     Report("no Windows memory checks per update", readable == 0 && vq == 0, d);

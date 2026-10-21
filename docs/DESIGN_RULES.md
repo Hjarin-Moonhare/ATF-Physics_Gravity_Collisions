@@ -187,3 +187,10 @@ the code does instead.
 - Fix: the pushes of a part's bones are coupled: no two differ by more than the furthest one bone moves alone with
   the skin smooth (`kGroupPushSpread`). A bone with no contact of its own follows the pushed ones, a pushed bone is
   carried along its own push by a bone pushed further, and only a squeeze takes pushes back, evenly.
+
+**30. A breast rests on the arms below it.**
+- Breaks: pushes from the bones' spheres leave crossed forearms in a bigger breast's lower side: the skin follows the
+  bones at about 0.7, the spheres keep the base size, and the shortest way out of a forearm squashes the breast into
+  the chest instead of lifting it.
+- Fix: the breast's skin samples are lifted, along the chest's up axis, over the forearms and hands below them, with
+  the forearms and level upper arms above as a ceiling; the breast's spheres, cap and spread go with its size.

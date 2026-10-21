@@ -613,6 +613,7 @@ int main() {
         g_cfg.maxPush[3] = -1;   // the glute cap must come from the file too
         g_cfg.maxPushOther = g_cfg.deadMaxAge = -1;   // and the other-body cap and the dead bodies' age limit
         g_cfg.couplePushes = false;   // must be read from the file
+        g_cfg.breastSize = g_cfg.breastLift = false;   // and these
         LoadSettings();
         // the new switches are in the file (not just the built-in defaults)
         char got[16];
@@ -635,6 +636,9 @@ int main() {
                   !strcmp(got, "1") && g_cfg.settlePaused;
         keysFile &= GetPrivateProfileStringA("Collision", "bCouplePushes", "missing", got, sizeof(got), g_iniPath) &&
                   !strcmp(got, "1") && g_cfg.couplePushes;
+        for (const char* k : {"bBreastSize", "bBreastLift"})
+            keysFile &= GetPrivateProfileStringA("Collision", k, "missing", got, sizeof(got), g_iniPath) && !strcmp(got, "1");
+        keysFile &= g_cfg.breastSize && g_cfg.breastLift;
         keysFile &= g_cfg.springGravityHips == 0.0f && g_cfg.springGravityCalves == 0.0f && g_cfg.springGravityArms == 0.0f &&
                   g_cfg.springGravityTorso == 0.0f;   // read from the file
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&

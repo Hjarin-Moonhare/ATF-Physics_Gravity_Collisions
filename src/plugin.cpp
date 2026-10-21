@@ -70,6 +70,7 @@ constexpr bool kCollisions = kDiag;
 #endif
 
 #include "collision_data.h"
+#include "lift_data.h"
 #include "body_shape_data.h"
 #include "preset_data.h"
 
@@ -109,7 +110,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 24, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 25, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -222,6 +223,7 @@ template <class T> static T& At(void* p, std::ptrdiff_t off) { return *reinterpr
 // costs microseconds, more with crash loggers' handlers installed).
 static std::atomic<std::uint64_t> g_badReads{0}, g_caughtReads{0};   // turned away / caught anyway (freed meanwhile)
 static std::atomic<std::uint64_t> g_vqCalls{0}, g_vqTicks{0};   // Readable's VirtualQuery calls, their time
+static std::atomic<std::uint64_t> g_vqTotal{0};   // ... all of them (the 5 s log clears the others; the tests read this)
 static std::atomic<std::uint64_t> g_readableCalls{0};          // Readable's calls (tests: none per update)
 static bool Readable(const void* p, size_t n) {
     const std::uintptr_t a = reinterpret_cast<std::uintptr_t>(p);
@@ -245,6 +247,7 @@ static bool Readable(const void* p, size_t n) {
         if constexpr (kDiag) {   // in game a query can take long (the kernel measures the whole region)
             QueryPerformanceCounter(&q1);
             g_vqCalls.fetch_add(1, std::memory_order_relaxed);
+            g_vqTotal.fetch_add(1, std::memory_order_relaxed);
             g_vqTicks.fetch_add(static_cast<std::uint64_t>(q1.QuadPart - q0.QuadPart), std::memory_order_relaxed);
         }
         if (!got || mbi.State != MEM_COMMIT) return false;
@@ -373,6 +376,8 @@ struct Settings {
     bool othersMeasureOnly = true;   // ... and their contacts only logged, not pushed (the first build measures)
     bool deadBodies = true;       // dead bodies take part (share their shapes, push and are pushed)
     bool couplePushes = true;     // [Collision] bCouplePushes: the bones of one part push as one soft mass
+    bool breastSize = true;       // [Collision] bBreastSize: a breast's collision shape, cap and spread follow its size
+    bool breastLift = true;       // [Collision] bBreastLift: a breast is lifted over the arms and hands below it
     float deadMaxAge = 0.75f;     // ... a dead body lying still is used from a share up to this old (s)
     float maxPushOther = 0.03f;   // ... other bodies push a soft bone at most this far (m), inside its group's cap
     float softScale = 1.1f;       // size of the soft spheres, x the measured size
@@ -474,6 +479,8 @@ static void ReadSettings() {   // from g_iniPath
     g_cfg.othersMeasureOnly = GetPrivateProfileIntA("Collision", "bOtherActorsMeasureOnly", 1, g_iniPath) != 0;
     g_cfg.deadBodies = GetPrivateProfileIntA("Collision", "bDeadBodies", 1, g_iniPath) != 0;
     g_cfg.couplePushes = GetPrivateProfileIntA("Collision", "bCouplePushes", 1, g_iniPath) != 0;
+    g_cfg.breastSize = GetPrivateProfileIntA("Collision", "bBreastSize", 1, g_iniPath) != 0;
+    g_cfg.breastLift = GetPrivateProfileIntA("Collision", "bBreastLift", 1, g_iniPath) != 0;
     g_cfg.softScale = readC("fSoftScale", g_cfg.softScale);
     g_cfg.softScale = clampf(g_cfg.softScale, 0.5f, 1.5f);
     const char* pushKeys[kNumGroups] = {"fMaxPushBreastCm", "fMaxPushBellyCm", "fMaxPushThighCm", "fMaxPushGluteCm"};
@@ -828,6 +835,8 @@ static std::atomic<std::uint32_t> g_lastScaleBits{0}, g_lastDtBits{0};
 static std::atomic<std::uint64_t> g_nextSampleMs{0};
 static std::atomic<std::uint64_t> g_pushes{0};      // soft bones pushed by a collision
 static std::atomic<std::uint32_t> g_maxPushMm{0};   // ... and the largest push
+static std::atomic<std::uint64_t> g_lifts{0};       // breasts lifted over an arm or a hand below them
+static std::atomic<std::uint32_t> g_maxLiftMm{0};   // ... and the largest lift
 static std::atomic<std::uint64_t> g_collideTicks{0}, g_collideCalls{0};   // time spent on collisions
 static std::atomic<bool> g_snapDue{false};   // log one body's positions (set every 5 s)
 static std::atomic<std::uint64_t> g_workTicks{0}, g_workCalls{0};
@@ -1084,9 +1093,11 @@ static void MaybeLog() {
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
         const std::uint64_t calls = g_collideCalls.exchange(0), ticks = g_collideTicks.exchange(0);
-        Log("   collisions: %llu bodies checked (%.1f us each), %llu bone pushes, largest %.1f cm",
+        Log("   collisions: %llu bodies checked (%.1f us each), %llu bone pushes, largest %.1f cm; %llu breasts lifted over "
+            "an arm below them, largest lift %.1f cm",
             static_cast<unsigned long long>(calls), calls ? ticks * 1e6 / freq.QuadPart / calls : 0.0,
-            static_cast<unsigned long long>(g_pushes.exchange(0)), g_maxPushMm.exchange(0) / 10.0);
+            static_cast<unsigned long long>(g_pushes.exchange(0)), g_maxPushMm.exchange(0) / 10.0,
+            static_cast<unsigned long long>(g_lifts.exchange(0)), g_maxLiftMm.exchange(0) / 10.0);
         if (g_cfg.proxies)
             Log("   world proxies: A-Body updates with the proxy nodes %llu (both proxies in a world %llu, their C_Chest "
                 "ragdoll body in a world %llu), without them %llu; your proxies at most %.1f / %.1f cm from their nodes; "
@@ -1458,6 +1469,8 @@ struct ActorView {
     float settle[128][3];           // each spring's gravity shape this frame (COM axes, m): PreUpdate, AddSettle
     bool settleOn = false;          // ... some part of this body has its gravity shape on
     bool paused = false;            // the game is paused this frame (settle[] holds each spring's rest point)
+    float collideSize = 1.0f;       // the breast's size for its collision shapes (BodyFactors)
+    float breastMorph[kLiftMorphs] = {};   // ... the sliders its skin samples follow
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -1709,11 +1722,11 @@ static void* FindByClass(void* holder, int span, const std::uintptr_t* vts, int 
 // The sliders read per body (sfee's keys, abody_morph.json)
 enum Slider { kBreastsLarge, kBreastsSmall, kButtLarge, kButtSmall, kHipsWide, kHipsNarrow, kWaistThin, kThighsLarge,
               kThighsSlim, kCalvesLarge, kCalvesSmall, kArmsLarge, kArmsSmall, kBreastsGravity, kBreastsTogether,
-              kNipplesLarge, kNipplesSmall, kNumSliders };
+              kNipplesLarge, kNipplesSmall, kBreastsPerky, kBreastsApart, kNumSliders };
 static const char* const kSliderKey[kNumSliders] = {
     "TF_BreastsLarge", "TF_BreastsSmall", "TF_ButtLarge", "TF_ButtSmall", "TF_HipsWide", "TF_HipsNarrow", "TF_WaistThin",
     "TF_ThighsLarge", "TF_ThighsSlim", "TF_CalvesLarge", "TF_CalvesSmall", "TF_ArmsLarge", "TF_ArmsSmall",
-    "TF_BreastsGravity", "TF_BreastsTogether", "TF_NipplesLarge", "TF_NipplesSmall"};
+    "TF_BreastsGravity", "TF_BreastsTogether", "TF_NipplesLarge", "TF_NipplesSmall", "TF_BreastsPerky", "TF_BreastsApart"};
 
 // The body triangle: three floats on the record, TESNPC+0x350 Thin, +0x354 Strong (muscular), +0x358
 // Overweight (heavy), 0 to 1 each.  The game hands them to the body as morph weights of those names, next to the
@@ -1827,6 +1840,8 @@ struct BodyFactors {
     float ceilScale = 1.0f;    // ... so its gravity shapes' ceilings x this (1 / strain, 0.15 to 1)
     bool shape = false;        // [BodyShape] in use for this body
     bool tuned = false;        // a character, outfit or planet factor in use for this body
+    float collideSize = 1.0f;  // the breast's size for its collision shapes (1 + 0.5 Large - 0.5 Small, 0.5 .. 1.6)
+    float breastMorph[kLiftMorphs] = {};   // ... and the weights of the sliders that move breast skin (lift_data.h)
     BodyFactors() {
         for (int p = 0; p < kNumParts; ++p) jiggle[p] = gravity[p] = 1.0f;
     }
@@ -1913,6 +1928,19 @@ static BodyFactors FactorsFrom(const SizeRead& r) {
     const float size = 1.0f + g_cfg.sizeLarge * r.slider[kBreastsLarge] - g_cfg.sizeSmall * r.slider[kBreastsSmall];
     f.breastSize = !g_cfg.sizeScaling ? 1.0f : (g_cfg.sizeOverride > 0 ? g_cfg.sizeOverride : (size < 0.1f ? 0.1f : size));
     f.gravity[kPartBreast] = f.breastSize;   // without [BodyShape]: the breast size alone (but for the guard, below)
+    const float cs = 1.0f + 0.5f * r.slider[kBreastsLarge] - 0.5f * r.slider[kBreastsSmall];
+    f.collideSize = cs < 0.5f ? 0.5f : (cs > 1.6f ? 1.6f : cs);
+    for (int m = 0; m < kLiftMorphs; ++m) {   // the body triangle as stored (the mesh carries all three), the sliders
+        const char* n = kLiftMorphName[m];
+        float w = 0.0f;
+        if (!strcmp(n, "Thin")) w = r.tri[0];
+        else if (!strcmp(n, "Strong")) w = r.tri[1];
+        else if (!strcmp(n, "Overweight")) w = r.tri[2];
+        else
+            for (int k = 0; k < kNumSliders; ++k)
+                if (!strcmp(n, kSliderKey[k])) w = r.slider[k];
+        f.breastMorph[m] = w;
+    }
     if (g_cfg.stretchGuard) {
         f.strain = StrainOf(r);
         const float c = 1.0f / f.strain;
@@ -2047,7 +2075,9 @@ static bool TuneReadsBodies() {   // the tuning needs to know who a body is, wha
     return T.nChars > 0 || (T.outfitsOn && T.nOutfits > 0) || (T.planet && g_gravityScaleOk);
 }
 static BodyFactors BodyFactorsOf(void* owner, void* actorHint = nullptr) {
-    if ((!g_cfg.sizeScaling && !g_cfg.shape && !TuneReadsBodies()) || !g_actorVt || !owner) return FactorsFrom(SizeRead{});
+    const bool collideReads = g_cfg.collision && (g_cfg.breastSize || g_cfg.breastLift);
+    if ((!g_cfg.sizeScaling && !g_cfg.shape && !TuneReadsBodies() && !collideReads) || !g_actorVt || !owner)
+        return FactorsFrom(SizeRead{});
     const std::uint64_t now = GetTickCount64();
     const std::uint64_t h = (reinterpret_cast<std::uintptr_t>(owner) >> 4) * 0x9E3779B97F4A7C15ull >> 55;
     SizeEntry* slot = nullptr;
@@ -2124,6 +2154,8 @@ static void TakeFactors(ActorView& v, const BodyFactors& f) {
     }
     v.shapeOn = f.shape;
     v.tuned = f.tuned;
+    v.collideSize = f.collideSize;
+    std::memcpy(v.breastMorph, f.breastMorph, sizeof(v.breastMorph));
 }
 
 // a spring as tuned.  Its part's level gives it that preset's springs (the bone's in preset_data.h, at the
@@ -3001,12 +3033,13 @@ constexpr int kNumTorso = 6;
 // ragdoll body; optional (not counted as missing)
 constexpr const char* kWorldBone[3] = {"ABody_Proxy_Breast_L", "ABody_Proxy_Breast_R", "C_Chest"};
 constexpr int kNumWorld = 3;
-constexpr int kNumBodyNodes = 4 * kNumColliders + kNumSoft + kNumTorso + kNumWorld;
+constexpr int kNumBodyNodes = 4 * kNumColliders + kNumSoft + kNumTorso + kNumWorld + 2 * kLiftHandBones;
 static int ColA(int k, int s) { return k * 2 + s; }                       // collider start, per side
 static int ColB(int k, int s) { return 2 * kNumColliders + k * 2 + s; }   // collider end, per side
 static int SoftN(int i) { return 4 * kNumColliders + i; }
 static int TorsoN(int t) { return 4 * kNumColliders + kNumSoft + t; }
 static int WorldN(int w) { return 4 * kNumColliders + kNumSoft + kNumTorso + w; }
+static int LiftN(int side, int k) { return WorldN(0) + kNumWorld + side * kLiftHandBones + k; }
 struct BodyNodes {
     void* com = nullptr;
     void* node[kNumBodyNodes] = {};
@@ -3029,6 +3062,11 @@ static BodyNodes* BodySlot(void* com, bool forInsert) {   // g_nodesMutex held
 }
 
 static void WantedName(int idx, char* out, size_t cap) {
+    if (idx >= LiftN(0, 0)) {
+        const int k = idx - LiftN(0, 0);
+        snprintf(out, cap, "%c_%s", k >= kLiftHandBones ? 'R' : 'L', kLiftHandBone[k % kLiftHandBones]);
+        return;
+    }
     if (idx >= WorldN(0)) {
         snprintf(out, cap, "%s", kWorldBone[idx - WorldN(0)]);
         return;
@@ -4097,14 +4135,15 @@ static void WatchProxies(const ActorView& v, int site) {
 // of its own follows the pushed ones.  Of two pushed bones, the one the move carries further along its own push follows
 // the other (its part carries it, away from what pushes it); when the move would carry both, or take both back against
 // their pushes (a squeeze), they give way evenly.  Every push stays inside its group's cap
-static void CouplePushes(Vec3 push[kNumSoft], const bool on[kNumSoft], const bool contact[kNumSoft], float size) {
+static void CouplePushes(Vec3 push[kNumSoft], const bool on[kNumSoft], const bool contact[kNumSoft], float size,
+                         float breastSize = 1.0f) {
     for (int g = 0; g < kNumGroups; ++g)
         for (int side = -1; side <= 1; ++side) {
             int m[kNumSoft], n = 0;
             for (int i = 0; i < kNumSoft; ++i)
                 if (on[i] && kSoft[i].group == g && kSoft[i].side == side) m[n++] = i;
             if (n < 2) continue;
-            const float spread = kGroupPushSpread[g] * size;
+            const float spread = kGroupPushSpread[g] * size * (g == 0 ? breastSize : 1.0f);
             for (int pass = 0; pass < 4; ++pass)
                 for (int a = 0; a < n; ++a)
                     for (int b = a + 1; b < n; ++b) {
@@ -4123,12 +4162,277 @@ static void CouplePushes(Vec3 push[kNumSoft], const bool on[kNumSoft], const boo
                         push[i] = Sub(push[i], Scale(corr, wi));
                         push[j] = Add(push[j], Scale(corr, 1.0f - wi));
                     }
-            const float cap = g_cfg.maxPush[g] * size;
+            const float cap = g_cfg.maxPush[g] * size * (g == 0 ? breastSize : 1.0f);
             for (int a = 0; a < n; ++a) {
                 const float L = std::sqrt(Dot(push[m[a]], push[m[a]]));
                 if (L > cap) push[m[a]] = Scale(push[m[a]], cap / L);
             }
         }
+}
+
+// a breast lifted over the arms and hands below it (crossed arms, a hand underneath).  Its skin (lift_data.h:
+// samples of the v0.7 body's breast skin in C_Chest's frame, and what the breast sliders do to them) sits where the
+// chest, the Pecs anchor and the four TF_Breast bones put it this frame, with the bones' sideways and fore-aft collision
+// pushes.  Along the chest's up axis: a sample inside a lifter (a forearm, a palm bone, a finger or thumb joint; its
+// radius + 3 mm) with the limb below it needs the lift that takes it out over the limb; a forearm, or an upper arm
+// within ~20 degrees of level, above a sample caps how far it may rise (to 0 when it already presses on it from above).
+// The four bones' lifts are the least ones that meet every need and cap (80 rounds of projections), each within the
+// breast's cap and any two within its spread; a lifted bone's vertical push is its lift (never below its own rise).
+// The same steps as tools/lift_model.py
+constexpr float kLiftMargin = 0.003f, kLiftReach = 0.25f, kLiftRaised = 0.35f;
+constexpr int kLiftSteps = 16, kLiftRounds = 80, kLiftMaxNeeds = 4096;
+constexpr int kLiftMaxSamples = kLiftSamplesL > kLiftSamplesR ? kLiftSamplesL : kLiftSamplesR;
+
+static float SegDist(const Vec3& q, const Vec3& a, const Vec3& b) {
+    const Vec3 d = Sub(q, ClosestOnSegment(a, b, q));
+    return std::sqrt(Dot(d, d));
+}
+
+// Along v + h u.  Inside the capsule now: true, with the shortest h > 0 out going up (*up) and down (*down).  Outside:
+// false, with the first h in (0, reach] that enters it (*up; 1e30 for none).  The distance from the line to the axis
+// segment is convex in h: golden-section for its least value, then bisection for the edges
+static bool LiftExits(const Vec3& v, const Vec3& u, const Vec3& a, const Vec3& b, float rr, float reach, float* up, float* down) {
+    auto f = [&](float h) { return SegDist(Add(v, Scale(u, h)), a, b) - rr; };
+    if (f(0.0f) < 0.0f) {
+        auto edge = [&](float lo, float hi) {   // f(lo) < 0 <= f(hi)
+            for (int i = 0; i < kLiftSteps; ++i) {
+                const float mid = 0.5f * (lo + hi);
+                if (f(mid) < 0.0f) lo = mid;
+                else hi = mid;
+            }
+            return hi;
+        };
+        *up = f(kLiftReach) >= 0.0f ? edge(0.0f, kLiftReach) : kLiftReach;
+        *down = f(-kLiftReach) >= 0.0f ? -edge(0.0f, -kLiftReach) : kLiftReach;
+        return true;
+    }
+    const float g = 0.6180339887f;
+    float lo = 0.0f, hi = reach, c = hi - g * (hi - lo), d = lo + g * (hi - lo), fc = f(c), fd = f(d);
+    for (int i = 0; i < kLiftSteps; ++i) {
+        if (fc < fd) {
+            hi = d;
+            d = c;
+            fd = fc;
+            c = hi - g * (hi - lo);
+            fc = f(c);
+        } else {
+            lo = c;
+            c = d;
+            fc = fd;
+            d = lo + g * (hi - lo);
+            fd = f(d);
+        }
+    }
+    const float hm = 0.5f * (lo + hi);
+    *down = 0.0f;
+    if (f(hm) >= 0.0f) {
+        *up = 1e30f;
+        return false;
+    }
+    float a0 = 0.0f, a1 = hm;   // f(a0) >= 0 > f(a1)
+    for (int i = 0; i < kLiftSteps; ++i) {
+        const float mid = 0.5f * (a0 + a1);
+        if (f(mid) < 0.0f) a1 = mid;
+        else a0 = mid;
+    }
+    *up = a1;
+    return false;
+}
+
+// A forearm or a hand (the collision capsules) within 25 cm of a breast's middle (its four bones): only then the lift
+static bool ArmsNearBreasts(const LimbCap caps[kNumColliders][2], const Vec3 pos[kNumSoft], const bool pushOn[kNumSoft],
+                            float size) {
+    for (int s = 0; s < 2; ++s) {
+        if (!pushOn[s] || !pushOn[2 + s] || !pushOn[4 + s] || !pushOn[6 + s]) continue;
+        const Vec3 c = Scale(Add(Add(pos[s], pos[2 + s]), Add(pos[4 + s], pos[6 + s])), 0.25f);
+        for (int k = 1; k <= 2; ++k)   // forearm, hand
+            for (int a = 0; a < 2; ++a)
+                if (caps[k][a].ok && SegDist(c, caps[k][a].a, caps[k][a].b) < 0.25f * size + caps[k][a].r) return true;
+    }
+    return false;
+}
+
+static void LiftBreasts(const ActorView& v, const BodyNodes& b, Vec3 push[kNumSoft], const bool pushOn[kNumSoft],
+                        const Vec3 pos[kNumSoft], const Xf parentXf[kNumSoft], float size, float breastSize) {
+    Xf chest;
+    if (!v.anchors[0].node || !WorldOf(At<void*>(v.anchors[0].node, 0x38), chest)) return;
+    Vec3 up = Add(Add(Scale(chest.ax[0], kLiftUp[0]), Scale(chest.ax[1], kLiftUp[1])), Scale(chest.ax[2], kLiftUp[2]));
+    up = Scale(up, 1.0f / std::sqrt(Dot(up, up)));
+    const float capB = g_cfg.maxPush[0] * size * breastSize, spreadB = kGroupPushSpread[0] * size * breastSize;
+    // the arms' shapes, both sides, from their bones
+    struct Shape { Vec3 a, b; float rr; bool lifter, holds; };
+    Shape shapes[2 * kNumLiftLimbs];
+    int nShapes = 0;
+    for (int c = 0; c < 2; ++c)
+        for (int k = 0; k < kNumLiftLimbs; ++k) {
+            const LiftLimb& d = kLiftLimb[k];
+            Xf xa, xb;
+            if (!WorldOf(b.node[LiftN(c, d.a)], xa)) continue;
+            Vec3 A = xa.pos, B;
+            if (d.b >= 0) {
+                if (!WorldOf(b.node[LiftN(c, d.b)], xb)) continue;
+                B = xb.pos;
+            } else {   // a fingertip: from the last joint along its parent's direction
+                if (!WorldOf(b.node[LiftN(c, d.parent)], xb)) continue;
+                const Vec3 u = Sub(A, xb.pos);
+                const float L = std::sqrt(Dot(u, u));
+                if (L < 1e-6f) continue;
+                B = Add(A, Scale(u, d.tip * size / L));
+            }
+            if (d.trim > 0.0f) A = Add(A, Scale(Sub(B, A), d.trim));
+            const Vec3 ab = Sub(B, A);
+            const float len = std::sqrt(Dot(ab, ab));
+            Shape& sh = shapes[nShapes++];
+            sh.a = A;
+            sh.b = B;
+            sh.rr = (d.radius[c] + kLiftMargin) * size;
+            sh.lifter = strcmp(d.name, "upperarm") != 0;
+            sh.holds = !strcmp(d.name, "forearm") ||
+                       (!strcmp(d.name, "upperarm") && len > 1e-6f && std::fabs(Dot(ab, up)) / len < kLiftRaised);
+        }
+    if (!nShapes) return;
+    static thread_local Vec3 V[kLiftMaxSamples];
+    static thread_local float ceilH[kLiftMaxSamples];
+    static thread_local int needK[kLiftMaxNeeds];
+    static thread_local float needH[kLiftMaxNeeds];
+    constexpr int kMaxGroups = kLiftGroupsL > kLiftGroupsR ? kLiftGroupsL : kLiftGroupsR;
+    for (int s = 0; s < 2; ++s) {
+        const int idx[4] = {0 + s, 2 + s, 4 + s, 6 + s};   // kSoft's Upper, Lower, Inner, Outer of this side
+        bool all = true;
+        for (int a = 0; a < 4; ++a) all = all && pushOn[idx[a]];
+        if (!all) continue;
+        const float (*rest)[3] = s ? kLiftBoneRestR : kLiftBoneRestL;
+        const LiftSample* smp = s ? kLiftSampleR : kLiftSampleL;
+        const LiftGroup* grp = s ? kLiftGroupR : kLiftGroupL;
+        const int n = s ? kLiftSamplesR : kLiftSamplesL, ng = s ? kLiftGroupsR : kLiftGroupsL;
+        Vec3 db[4], horiz[4];
+        float baseH[4], moveMost = 0.0f;
+        for (int a = 0; a < 4; ++a) {
+            db[a] = Sub(pos[idx[a]], Apply(chest, rest[a]));
+            baseH[a] = Dot(push[idx[a]], up);
+            horiz[a] = Sub(push[idx[a]], Scale(up, baseH[a]));
+            const Vec3 m = Add(db[a], horiz[a]);
+            moveMost = std::fmax(moveMost, std::sqrt(Dot(m, m)));
+        }
+        const Vec3 dp = Sub(parentXf[idx[0]].pos, Apply(chest, s ? kLiftPecsRestR : kLiftPecsRestL));
+        moveMost = std::fmax(moveMost, std::sqrt(Dot(dp, dp)));
+        // where a sample is this frame: the chest x (rest + the sliders), the anchor's and the bones' moves x its weights
+        auto place = [&](const float p[3], const float (*d)[3], const float w[4], float wPecs) {
+            float l[3] = {p[0], p[1], p[2]};
+            for (int m = 0; m < kLiftMorphs; ++m)
+                if (v.breastMorph[m] != 0.0f)
+                    for (int j = 0; j < 3; ++j) l[j] += v.breastMorph[m] * d[m][j];
+            Vec3 q = Add(Apply(chest, l), Scale(dp, wPecs));
+            for (int a = 0; a < 4; ++a) q = Add(q, Scale(Add(db[a], horiz[a]), w[a]));
+            return q;
+        };
+        // the groups: their middles and how far a member can be from it; the samples only when a limb comes near
+        Vec3 gc[kMaxGroups];
+        float gr[kMaxGroups];
+        bool placed[kMaxGroups] = {};
+        Vec3 lo = {1e30f, 1e30f, 1e30f}, hi = {-1e30f, -1e30f, -1e30f};
+        for (int g = 0; g < ng; ++g) {
+            gc[g] = place(grp[g].c, grp[g].d, grp[g].w, grp[g].wPecs);
+            float r = grp[g].r0;
+            for (int m = 0; m < kLiftMorphs; ++m) r += std::fabs(v.breastMorph[m]) * grp[g].dm[m];
+            gr[g] = r * chest.scale + grp[g].dw * moveMost;
+            lo = {std::fmin(lo.x, gc[g].x - gr[g]), std::fmin(lo.y, gc[g].y - gr[g]), std::fmin(lo.z, gc[g].z - gr[g])};
+            hi = {std::fmax(hi.x, gc[g].x + gr[g]), std::fmax(hi.y, gc[g].y + gr[g]), std::fmax(hi.z, gc[g].z + gr[g])};
+        }
+        auto ensure = [&](int g) {
+            if (placed[g]) return;
+            placed[g] = true;
+            for (int k = grp[g].first; k < grp[g].first + grp[g].count; ++k) {
+                V[k] = place(smp[k].p, smp[k].d, smp[k].w, smp[k].wPecs);
+                ceilH[k] = 1e30f;
+            }
+        };
+        // near: the shape's box against the breast's
+        auto nearBox = [&](const Shape& sh, float reach) {
+            const float rr = sh.rr + reach;
+            const Vec3 mn = {std::fmin(sh.a.x, sh.b.x), std::fmin(sh.a.y, sh.b.y), std::fmin(sh.a.z, sh.b.z)};
+            const Vec3 mx = {std::fmax(sh.a.x, sh.b.x), std::fmax(sh.a.y, sh.b.y), std::fmax(sh.a.z, sh.b.z)};
+            return !(mn.x - rr > hi.x || mn.y - rr > hi.y || mn.z - rr > hi.z || mx.x + rr < lo.x || mx.y + rr < lo.y ||
+                     mx.z + rr < lo.z);
+        };
+        // the needs first (skin inside a lifter, the limb below it): without one this breast is not lifted
+        int nNeed = 0;
+        for (int c = 0; c < nShapes; ++c) {
+            const Shape& sh = shapes[c];
+            if (!sh.lifter || !nearBox(sh, 0.0f)) continue;
+            for (int g = 0; g < ng; ++g) {
+                if (SegDist(gc[g], sh.a, sh.b) >= sh.rr + gr[g]) continue;
+                ensure(g);
+                for (int k = grp[g].first; k < grp[g].first + grp[g].count; ++k) {
+                    if (SegDist(V[k], sh.a, sh.b) >= sh.rr) continue;
+                    float ua = 0, da = 0;
+                    if (LiftExits(V[k], up, sh.a, sh.b, sh.rr, capB, &ua, &da) && ua <= da && nNeed < kLiftMaxNeeds) {
+                        needK[nNeed] = k;
+                        needH[nNeed++] = ua;
+                    }
+                }
+            }
+        }
+        if (!nNeed) continue;
+        // then the caps: a holder pressing on a sample from above, or above it within the breast's cap
+        for (int g = 0; g < ng; ++g) ensure(g);   // the caps go over every sample (the solve reads them all)
+        for (int c = 0; c < nShapes; ++c) {
+            const Shape& sh = shapes[c];
+            if (!sh.holds || !nearBox(sh, capB)) continue;
+            for (int g = 0; g < ng; ++g) {
+                if (SegDist(gc[g], sh.a, sh.b) >= sh.rr + capB + gr[g]) continue;
+                for (int k = grp[g].first; k < grp[g].first + grp[g].count; ++k) {
+                    if (SegDist(V[k], sh.a, sh.b) >= sh.rr + capB) continue;
+                    float ua = 0, da = 0;
+                    if (LiftExits(V[k], up, sh.a, sh.b, sh.rr, capB, &ua, &da)) {
+                        if (ua > da) ceilH[k] = 0.0f;
+                    } else if (ua < ceilH[k]) {
+                        ceilH[k] = ua;
+                    }
+                }
+            }
+        }
+        float h[4] = {0, 0, 0, 0};
+        for (int round = 0; round < kLiftRounds; ++round) {
+            for (int e = 0; e < nNeed; ++e) {
+                const float* w = smp[needK[e]].w;
+                const float cur = w[0] * h[0] + w[1] * h[1] + w[2] * h[2] + w[3] * h[3];
+                const float ww = w[0] * w[0] + w[1] * w[1] + w[2] * w[2] + w[3] * w[3];
+                if (cur < needH[e] && ww > 1e-12f)
+                    for (int a = 0; a < 4; ++a) h[a] += w[a] * (needH[e] - cur) / ww;
+            }
+            for (int k = 0; k < n; ++k) {
+                if (ceilH[k] > 1e29f) continue;
+                const float* w = smp[k].w;
+                const float cur = w[0] * h[0] + w[1] * h[1] + w[2] * h[2] + w[3] * h[3];
+                const float ww = w[0] * w[0] + w[1] * w[1] + w[2] * w[2] + w[3] * w[3];
+                if (cur > ceilH[k] && ww > 1e-12f)
+                    for (int a = 0; a < 4; ++a) h[a] += w[a] * (ceilH[k] - cur) / ww;
+            }
+            for (int a = 0; a < 4; ++a) h[a] = h[a] < -capB ? -capB : (h[a] > capB ? capB : h[a]);
+            for (int a = 0; a < 4; ++a)
+                for (int c = a + 1; c < 4; ++c) {
+                    const float dd = h[a] - h[c];
+                    if (std::fabs(dd) > spreadB) {
+                        const float corr = 0.5f * (std::fabs(dd) - spreadB) * (dd > 0 ? 1.0f : -1.0f);
+                        h[a] -= corr;
+                        h[c] += corr;
+                    }
+                }
+        }
+        float most = 0;
+        for (int a = 0; a < 4; ++a) {
+            const float hb = h[a] > 1e-6f ? std::fmax(h[a], baseH[a]) : baseH[a];
+            push[idx[a]] = Add(horiz[a], Scale(up, hb));
+            most = std::fmax(most, h[a]);
+        }
+        if (most > 1e-4f) {
+            g_lifts.fetch_add(1, std::memory_order_relaxed);
+            const std::uint32_t mm = static_cast<std::uint32_t>(most * 1000);
+            std::uint32_t prev = g_maxLiftMm.load(std::memory_order_relaxed);
+            while (mm > prev && !g_maxLiftMm.compare_exchange_weak(prev, mm)) {}
+        }
+    }
 }
 
 static void Collide(ActorView& v) {
@@ -4144,6 +4448,7 @@ static void Collide(ActorView& v) {
     Xf comXf;
     if (!WorldOf(v.com, comXf)) return;
     const float size = comXf.scale;   // the actor's scale: all sizes were measured at 1
+    const float bs = g_cfg.breastSize ? v.collideSize : 1.0f;   // the breasts' shapes, caps and spread x their size
 
     LimbCap caps[kNumColliders][2];
     LimbCaps(b, size, 1.0f, caps);
@@ -4253,7 +4558,7 @@ static void Collide(ActorView& v) {
         const SoftBoneDef& d = kSoft[i];
         if (d.group == 2 && !g_cfg.innerThighs) continue;
         if (d.group == 3 && !g_cfg.glutes) continue;
-        const float r = d.radius * g_cfg.softScale * size;
+        const float r = d.radius * g_cfg.softScale * size * (d.group == 0 ? bs : 1.0f);
         Vec3 total = {0, 0, 0};
         for (int k = 0; k < kNumColliders; ++k) {
             const int rule = kGroupMeets[d.group][k];
@@ -4281,7 +4586,7 @@ static void Collide(ActorView& v) {
             if (j < 0 || !have[j]) continue;
             const Vec3 dv = Sub(posNoGravity[i], posNoGravity[j]);
             const float dist = std::sqrt(Dot(dv, dv));
-            float contact = r + kSoft[j].radius * g_cfg.softScale * size;
+            float contact = r + kSoft[j].radius * g_cfg.softScale * size * (kSoft[j].group == 0 ? bs : 1.0f);
             const float rest = d.restToPair[p] * size;
             if (rest > 0 && rest < contact) contact = rest;
             if (dist > 1e-6f && dist < contact) {
@@ -4344,7 +4649,7 @@ static void Collide(ActorView& v) {
         if (lo > capOther) totalOther = Scale(totalOther, capOther / lo);
         total = Add(total, totalOther);
         float L = std::sqrt(Dot(total, total));
-        const float cap = g_cfg.maxPush[d.group] * size;
+        const float cap = g_cfg.maxPush[d.group] * size * (d.group == 0 ? bs : 1.0f);
         if (L > cap) {
             total = {total.x * cap / L, total.y * cap / L, total.z * cap / L};
             L = cap;
@@ -4353,7 +4658,8 @@ static void Collide(ActorView& v) {
         pushOn[i] = true;
         touched[i] = L >= 1e-4f;
     }
-    if (g_cfg.couplePushes) CouplePushes(push, pushOn, touched, size);
+    if (g_cfg.couplePushes) CouplePushes(push, pushOn, touched, size, bs);
+    if (g_cfg.breastLift && ArmsNearBreasts(caps, pos, pushOn, size)) LiftBreasts(v, b, push, pushOn, pos, parentXf, size, bs);
     for (int i = 0; i < kNumSoft; ++i) {
         if (!pushOn[i]) continue;
         const Vec3 total = push[i];
@@ -4891,10 +5197,12 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         g_cfg.sizeScaling, g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
     Log("collisions %d (measure only %d): soft size x%.2f, largest push breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, "
         "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d); a part's bones push as one %d (no "
-        "two differ by more than: breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, glute %.1f cm)",
+        "two differ by more than: breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, glute %.1f cm); breast shapes x its "
+        "size %d; breasts lifted over the arms below them %d (%d + %d skin samples, %d arm and hand shapes a side)",
         g_cfg.collision, g_cfg.measureOnly, g_cfg.softScale, g_cfg.maxPush[0] * 100, g_cfg.maxPush[1] * 100, g_cfg.maxPush[2] * 100,
         g_cfg.maxPush[3] * 100, g_cfg.innerThighs, g_cfg.glutes, g_cfg.others, g_cfg.othersMeasureOnly, g_cfg.couplePushes,
-        kGroupPushSpread[0] * 100, kGroupPushSpread[1] * 100, kGroupPushSpread[2] * 100, kGroupPushSpread[3] * 100);
+        kGroupPushSpread[0] * 100, kGroupPushSpread[1] * 100, kGroupPushSpread[2] * 100, kGroupPushSpread[3] * 100,
+        g_cfg.breastSize, g_cfg.breastLift, kLiftSamplesL, kLiftSamplesR, kNumLiftLimbs);
     Log("other bodies push at most %.1f cm; dead bodies %d (a dead body lying still: its shapes used up to %.0f ms old)",
         g_cfg.maxPushOther * 100, g_cfg.deadBodies, g_cfg.deadMaxAge * 1000);
     Log("body shape %d: jiggle x(1 %+.2f thin %+.2f muscular %+.2f heavy), gravity x(1 %+.2f thin %+.2f muscular %+.2f "

@@ -152,6 +152,15 @@ Writes the collision header from `sizes.json`, `sizes_glute.json` and `natural_r
 
 It prints the soft-bone count and the two fallback offsets, in cm.
 
+### gen_lift_data.py: src\lift_data.h and data\lift_data.json
+
+The breast lift's data: A-Body's breast skin (the summed weight of a breast's four bones at least 0.1), one sample per
+1 cm cell, in 3 cm groups; per sample its rest position in `C_Chest`'s frame, its change per unit of the sliders that
+move breast skin (Thin, Strong, Overweight and the TF breast sliders) and its weights (the four bones with their
+children, and the Pecs anchor); per group its mean and the bound of its members. Also the bones' and the anchor's
+rest positions, the chest's up axis, and the tight arm and hand shapes from `limb_shapes.py` (each with the radius
+that holds 95% of the skin nearest to it). `lift_model.py` is the same lift for the design model.
+
 ### ..\tests\export_collision_cases.py: tests\cases\*.txt
 
 Poses A-Body's skeleton ten ways, and writes what `collide_test.cpp` checks the plugin against: `rest`, `arms_forward`,

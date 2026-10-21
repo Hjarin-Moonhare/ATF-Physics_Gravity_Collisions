@@ -144,6 +144,14 @@ thread never waits on disk.
   follows the other; in a squeeze (the move would carry both, or take both back against their pushes) they give way
   evenly. Four passes over the part's pairs, then the group's cap again. The belly's, inner thighs' and glutes'
   spreads are wider than their caps, so there it only acts in a squeeze.
+- A breast's sphere, cap and spread are x its size (`[Collision] bBreastSize`): 1 + 0.5 Large - 0.5 Small, 0.5 to 1.6.
+- A breast is lifted over the arms below it (`LiftBreasts`, `[Collision] bBreastLift`), when a forearm or a hand
+  comes within 25 cm of it. Its skin samples (`lift_data.h`: about 460 a side in 3 cm groups, each group with a bound
+  so a shape tests the groups first) are placed from the chest, the Pecs anchor and the four bones, with the sliders'
+  changes and the bones' sideways and fore-aft pushes. Tight shapes of the arm and hand (21 a side: the upper arm from
+  half way down, the forearm, four palm bones, every finger and thumb joint) come from the bones. Along the chest's up
+  axis a sample inside a lifter with the limb below needs a lift; a forearm or a level upper arm above caps it. The
+  four lifts are solved by projections (80 rounds) within the breast's cap and spread.
 - Breast against breast uses the positions without the plugin's gravity offsets: lying on a side moves one breast
   toward the other on purpose.
 

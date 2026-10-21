@@ -33,7 +33,8 @@ int main(int argc, char** argv) {
                                   cfg.springGravityHips, cfg.springGravityCalves, cfg.springGravityArms, cfg.springGravityTorso};
     printf("springs");
     Parts(sag);
-    printf("collision enabled %d couple %d\n", cfg.collision ? 1 : 0, cfg.couplePushes ? 1 : 0);
+    printf("collision enabled %d couple %d size %d lift %d\n", cfg.collision ? 1 : 0, cfg.couplePushes ? 1 : 0,
+           cfg.breastSize ? 1 : 0, cfg.breastLift ? 1 : 0);
     printf("files %d %s\n", t.files, t.fileNames);
     printf("reload %d\n", g_cfg.tuneReload ? 1 : 0);
     printf("planet %d %.4f\n", t.planet ? 1 : 0, t.planetAmount);

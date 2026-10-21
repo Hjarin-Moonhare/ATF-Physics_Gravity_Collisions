@@ -43,6 +43,10 @@ the rest pose).
 - **The game's layout with no Windows checks:** learning it, the bone search and the collisions make 0 memory checks.
 - **Collisions against the gravity shapes** at x2, in each shape with the arms at rest, at the sides and hanging.
   These lines print the pushes and have no `OK`.
+- **Arm poses that lift the breasts:** `folded` (the forearms crossed under the breasts), `clasped` (the hands
+  clasped at the upper chest) and `across` (one forearm over the waist, the other up over a breast), held to the
+  design's pushes with the lift (`tools/lift_model.py`) like the other poses; a breast x1.25 pushed further but inside
+  its cap, and `across` lifted further with the lift than without it.
 - **A part pushed as one** (`CouplePushes`, on a breast's four bones): one bone pushed 5 cm keeps its push and the
   other three follow to within the spread (2 cm); of two bones pushed the same way two spreads apart, the less
   pushed one is carried along and the other keeps its push; in a squeeze both give way evenly; pushes within the

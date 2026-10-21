@@ -134,6 +134,48 @@ static void ResetOthers() {
     }
 }
 
+// a case's breast pushes with the breast's size factor and the lift switch set; the largest, the largest rise
+static void SizedPushes(const char* pose, float breastSize, bool lift, double* biggest, double* rise) {
+    ResetOthers();
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s\\cases\\%s.txt", g_tests, pose);
+    Fake f;
+    f.kidLists.reserve(512);
+    std::map<std::string, Vec3> expect;
+    *biggest = *rise = -1;
+    if (!Load(path, f, expect, {})) return;
+    ActorView v;
+    v.com = f.node["COM"];
+    v.collideSize = breastSize;
+    const char* bone[4] = {"Upper", "Lower", "Inner", "Outer"};
+    for (int s = 0; s < 2; ++s) {
+        Anchor& a = v.anchors[s];
+        a.node = f.node[s ? "R_Pecs" : "L_Pecs"];
+        a.com = v.com;
+        a.rest = reinterpret_cast<const float*>(static_cast<char*>(a.node) + 0x70);
+        for (int b = 0; b < 4; ++b) a.bones[b] = f.node[std::string("TF_Breast_") + bone[b] + (s ? "_R" : "_L")];
+    }
+    const bool savedLift = g_cfg.breastLift;
+    g_cfg.breastLift = lift;
+    Collide(v);
+    g_cfg.breastLift = savedLift;
+    *biggest = *rise = 0;
+    for (int s = 0; s < 2; ++s)
+        for (int b = 0; b < 4; ++b) {
+            void* node = v.anchors[s].bones[b];
+            const float* add = v.AddFor(node);
+            if (!add) continue;
+            Vec3 got = {0, 0, 0};
+            void* parent = At<void*>(node, 0x38);
+            for (int k = 0; k < 3; ++k) {
+                const Vec3 ax = Row(parent, 0x80, k);
+                got = {got.x + add[k] * ax.x, got.y + add[k] * ax.y, got.z + add[k] * ax.z};
+            }
+            *biggest = std::fmax(*biggest, std::sqrt(Dot(got, got)) * 100);
+            *rise = std::fmax(*rise, got.z * 100);
+        }
+}
+
 static int RunCase(const char* pose, const std::vector<std::string>& hide, float tolCm, bool rebuildAnchor) {
     ResetOthers();
     char path[MAX_PATH];
@@ -970,9 +1012,9 @@ static int RunDeadBodies() {
         g_original = [](void*, void*) {};
         void* root = fc.node["HumanExportRoot"];
         Hooked<1>(root, nullptr, npc);   // first update: searches
-        const std::uint64_t vq0 = g_vqCalls.load(), life0 = g_lifeReads.load(), rd0 = g_readableCalls.load();
+        const std::uint64_t vq0 = g_vqTotal.load(), life0 = g_lifeReads.load(), rd0 = g_readableCalls.load();
         for (int i = 0; i < 2000; ++i) Hooked<1>(root, nullptr, npc);
-        const std::uint64_t vq = g_vqCalls.load() - vq0, life = g_lifeReads.load() - life0, rd = g_readableCalls.load() - rd0;
+        const std::uint64_t vq = g_vqTotal.load() - vq0, life = g_lifeReads.load() - life0, rd = g_readableCalls.load() - rd0;
         OtherEntry* eC = entryOf(fc);
         const bool sharedAlive = eC && !eC->dead && !eC->abody;
         FakeLives::Set(npc, 2);
@@ -1922,7 +1964,14 @@ int main() {
     FILE* f = nullptr;
     if (fopen_s(&f, g_logPath, "w") == 0 && f) fclose(f);
     const char* poses[] = {"rest", "arms_forward", "arms_crossed", "sitting", "deep_squat", "sprint_stride",
-                           "hands_on_glutes", "hands_on_glutes_firm"};
+                           "hands_on_glutes", "hands_on_glutes_firm", "folded", "clasped", "across"};
+    // photo-mode poses saved from a pose mod (tests/export_collision_cases.py writes them when it has them)
+    std::vector<const char*> modPoses;
+    for (const char* p : {"armcrossed_pose", "finger_pose", "choked_pose"}) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%s\\cases\\%s.txt", g_tests, p);
+        if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) modPoses.push_back(p);
+    }
     int fails = 0;
     g_cfg.innerThighs = true;   // the designed cases include the inner-thigh group (off by default in game)
     for (int layout = kPointerAndCount; layout <= kGame; ++layout) {
@@ -1932,6 +1981,7 @@ int main() {
         g_layoutRetryMs = 0;
         printf("--- children kept as: %s\n", kFakeLayoutName[layout]);
         for (const char* p : poses) fails += RunCase(p, {}, 0.01f, false);
+        for (const char* p : modPoses) fails += RunCase(p, {}, 0.01f, false);
         fails += RunCase("arms_forward", {}, 0.01f, true);
         // without the wrist and finger bones the hand is placed from the rest pose: close, not exact
         fails += RunCase("arms_forward", {"L_Wrist", "R_Wrist", "L_Middle1", "R_Middle1"}, 0.3f, false);
@@ -2097,6 +2147,24 @@ int main() {
                 return out[0].z == 0.5f * S && out[1].z == 0.9f * S && out[2].y == 0.2f * S && out[3].z == 0.0f;
             });
         }
+    }
+    {   // bigger breasts (x1.25 from their sliders) meet the folded arms sooner and may go further; across
+        // (a forearm under the right breast) rises further with the lift than with the pushes alone
+        g_fakeLayout = kGame;
+        g_layoutState = 0;
+        g_layoutTries = 0;
+        g_layoutRetryMs = 0;
+        double b1, r1, b2, r2, b3, r3, b4, r4;
+        SizedPushes("folded", 1.0f, true, &b1, &r1);
+        SizedPushes("folded", 1.25f, true, &b2, &r2);
+        SizedPushes("across", 1.0f, true, &b3, &r3);
+        SizedPushes("across", 1.0f, false, &b4, &r4);
+        char d[220];
+        snprintf(d, sizeof(d), "folded: largest push x1 %.2f cm, x1.25 %.2f cm (cap %.2f); across: rise lifted %.2f cm, lift off "
+                 "%.2f cm", b1, b2, g_cfg.maxPush[0] * 125, r3, r4);
+        const bool ok = b1 > 0 && b2 > b1 && b2 <= g_cfg.maxPush[0] * 125 * 1.4143 + 1e-3 && r3 > r4 + 0.3;
+        printf("%-14s %-40s %s  %s\n", "breast size", "(x1.25, and the lift off)", d, ok ? "OK" : "FAIL");
+        fails += ok ? 0 : 1;
     }
     printf("%s\n", fails ? "SOME CASES FAILED" : "all cases passed");
     return fails;
