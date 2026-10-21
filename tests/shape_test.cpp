@@ -830,6 +830,90 @@ int main() {
             const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
             SetRows(com9, upright);
         }
+        {   // the parts' gravity shapes, lying on the back (gravity changes by (0, -1, 1) in COM's axes)
+            const Vec3 onBack[3] = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
+            const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            const float stiff[3] = {1000, 1000, 1000};
+            const float hipTravel[3] = {1.2650f, 0.6050f, 2.8000f};   // TF_Hip_Outer's Max + Max travel
+            const PresetSpring& hp = kPresetBones[bone("TF_Hip_Outer_L")].s[0][0];
+            auto want = [&](int k, float level) { return level * kPartSettleLimit[kPartHip] * 0.85f * hipTravel[k] / 60.0f; };
+            auto run = [&](const Vec3 rows[3], float gravity, float* settle, float* added) {
+                SetRows(com9, rows);
+                Spring h = NewSpring(com9, pecs9, "TF_Hip_Outer_L", hp.maxDist, stiff, hp.damping, zero);
+                ActorView v;
+                v.com = com9;
+                v.gravity[kPartHip] = gravity;
+                v.springs[v.nSprings++] = h.inst;
+                PreUpdate(v);
+                memcpy(settle, v.settle[0], 12);
+                const bool on = v.settleOn;
+                if (on) AddSettle(v);
+                const float* a = v.AddFor(h.target);
+                for (int k = 0; k < 3; ++k) added[k] = a ? a[k] : -1.0f;
+                return on && a != nullptr;
+            };
+            const Settings keep = g_cfg;
+            g_cfg.springGravityHips = 0.0f;
+            g_cfg.gravityShape = 1.0f;
+            float s[3], a[3];
+            bool on = run(onBack, 1.0f, s, a);
+            // COM's axes in the world: side (1,0,0), fore/aft (0,0,1), up (0,-1,0); the bone's parent is upright
+            bool ok = on && s[0] == 0.0f && std::fabs(s[1] + want(1, 1)) < 1e-7f && std::fabs(s[2] - want(2, 1)) < 1e-7f &&
+                      std::fabs(a[0]) < 1e-7f && std::fabs(a[1] + want(2, 1)) < 1e-7f && std::fabs(a[2] + want(1, 1)) < 1e-7f;
+            snprintf(d, sizeof(d), "no spring sag: fore/aft %.2f, up %.2f cm (want %.2f, %.2f), on the bone (%.2f, %.2f, %.2f)",
+                     s[1] * 100, s[2] * 100, -want(1, 1) * 100, want(2, 1) * 100, a[0] * 100, a[1] * 100, a[2] * 100);
+            Report("gravity shape on the hips", d, ok);
+            g_cfg.springGravityHips = 0.05f;   // a stiff spring sags 9.81 x 0.05 / 1000 m on each axis: the shape tops it up
+            run(onBack, 1.0f, s, a);
+            const float seen = 9.81f * 0.05f / 1000.0f;
+            ok = std::fabs(s[1] + (want(1, 1) - seen)) < 1e-7f && std::fabs(s[2] - (want(2, 1) - seen)) < 1e-7f;
+            snprintf(d, sizeof(d), "springs' own sag %.3f mm: the shape adds %.3f / %.3f cm (want %.3f / %.3f)", seen * 1000,
+                     -s[1] * 100, s[2] * 100, (want(1, 1) - seen) * 100, (want(2, 1) - seen) * 100);
+            Report("... over the springs' sag", d, ok);
+            g_cfg.gravityShape = 0.004f;   // a tiny shape: the springs' own sag is past it, nothing added
+            run(onBack, 1.0f, s, a);
+            ok = s[0] == 0.0f && s[1] == 0.0f && s[2] == 0.0f && a[0] == 0.0f && a[1] == 0.0f && a[2] == 0.0f;
+            Report("... springs past the shape", ok ? "nothing added (a zero offset handed on)" : "WRONG", ok);
+            g_cfg.springGravityHips = 0.0f;
+            g_cfg.gravityShape = 1.0f;
+            tune([](TuneSettings& t) { t.part[kPartHip].shape = 0.5f; });
+            run(onBack, 1.0f, s, a);
+            const bool half = std::fabs(s[2] - want(2, 0.5f)) < 1e-7f;
+            untune();
+            run(onBack, 0.6f, s, a);
+            const bool thin = std::fabs(s[2] - want(2, 0.6f)) < 1e-7f;
+            run(onBack, 1.5f, s, a);
+            const bool heavy = std::fabs(s[2] - want(2, 1.0f)) < 1e-7f;
+            snprintf(d, sizeof(d), "a file's fGravityShape 0.5: x0.5 %s; a thin body (x0.6): x0.6 %s; a heavy one (x1.5): x1 %s",
+                     half ? "yes" : "NO", thin ? "yes" : "NO", heavy ? "yes" : "NO");
+            Report("... per part and per body", d, half && thin && heavy);
+            const Vec3 headDown[3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, -1}};   // upside down: up changes by 2 g, held at 1
+            run(headDown, 1.0f, s, a);
+            const bool held = std::fabs(s[2] - want(2, 1)) < 1e-7f && s[0] == 0.0f && s[1] == 0.0f;
+            on = run(upright, 1.0f, s, a);
+            const bool standing = on && s[0] == 0.0f && s[1] == 0.0f && s[2] == 0.0f && a[0] == 0.0f && a[2] == 0.0f;
+            g_cfg.enabled = false;
+            on = run(onBack, 1.0f, s, a);
+            const bool off = !on && s[2] == 0.0f;
+            g_cfg.enabled = true;
+            {   // the breasts' gravity shapes are their own
+                SetRows(com9, onBack);
+                const PresetSpring& bp = kPresetBones[bone("TF_Breast_Lower_L")].s[0][0];
+                Spring b = NewSpring(com9, pecs9, "TF_Breast_Lower_L", bp.maxDist, stiff, bp.damping, zero);
+                ActorView v;
+                v.com = com9;
+                v.springs[v.nSprings++] = b.inst;
+                g_cfg.springGravity = 0.0f;
+                PreUpdate(v);
+                const bool none = v.settle[0][0] == 0.0f && v.settle[0][1] == 0.0f && v.settle[0][2] == 0.0f;
+                snprintf(d, sizeof(d), "upside down held at 1 g: %s; standing: none, a zero handed on: %s; [Gravity] "
+                         "bEnabled=0: none: %s; the breasts: none: %s", held ? "yes" : "NO", standing ? "yes" : "NO",
+                         off ? "yes" : "NO", none ? "yes" : "NO");
+                Report("... limits", d, held && standing && off && none);
+            }
+            g_cfg = keep;
+            SetRows(com9, upright);
+        }
         {   // per character, per outfit and per planet (the reads on a fake character and record)
             g_formIdOk = g_wornOk = g_gravityScaleOk = true;
             auto person = [&](bool player, std::uint32_t ref, std::uint32_t base) {
@@ -948,8 +1032,8 @@ int main() {
             put("All.ini", "[All]\r\nsLevel=Lower\r\n");
             put("Breasts.ini", "[Breasts]\r\nsLevel=High\r\nfSwing=1.2\r\nfUpDown=0.5\r\nfSettle=2\r\nfBounceSpeed=1.1\r\nfSag=0.08\r\n"
                 "TF_Breast_Lower_L=0.7\r\nTF_Glute_Lower_L=0.1\r\nfGravityBack=4\r\nfGravitySide=0\r\nfGravityHang=99\r\n"
-                "fGravityDown=0.1\r\n");
-            put("Butt.ini", "[Butt]\r\nsLevel=Banana\r\nfSwing=nan\r\nfBounceSpeed=9\r\nfGravityBack=3\r\n");
+                "fGravityDown=0.1\r\nfGravityShape=1\r\n");
+            put("Butt.ini", "[Butt]\r\nsLevel=Banana\r\nfSwing=nan\r\nfBounceSpeed=9\r\nfGravityBack=3\r\nfGravityShape=7\r\n");
             put("Outfits.ini", "[Outfit Spacesuit upper]\r\nsSlots=35, 36\r\nfBreasts=0.5\r\n[Outfit My suit]\r\nsForm=0001A2B3\r\n"
                 "fAll=0.7\r\n[Outfit nothing]\r\nfAll=0.1\r\n");
             put("Characters.ini", "[Player]\r\nfBreasts=1.3\r\n[NPC 0001ABCD]\r\nfAll=0.8\r\n[NPC zz]\r\nfAll=0.2\r\n");
@@ -965,7 +1049,8 @@ int main() {
                               t.outfits[1].part[kPartCalf] == 0.7f && t.nChars == 2 && t.chars[0].player &&
                               t.chars[0].part[kPartBreast] == 1.3f && t.chars[1].id == 0x1ABCD && t.springs && t.scaled && t.damping &&
                               b.gravPose[0] == 4.0f && b.gravPose[1] == -1.0f && b.gravPose[2] == 8.0f && b.gravPose[3] == 0.5f &&
-                              u.gravPose[0] == -1.0f;   // per shape, the breasts only
+                              u.gravPose[0] == -1.0f &&   // per shape, the breasts only
+                              b.shape == -1.0f && u.shape == 2.0f;   // a part's gravity shape, held at 2
             snprintf(d, sizeof(d), "%d files (%s); breasts %s x%.1f, the butt's level from [All], garbage held", t.files, t.fileNames,
                      b.level == kLevelHigh ? "High" : "WRONG", b.swing);
             Report("the tuning files", d, read);

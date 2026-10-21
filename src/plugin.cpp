@@ -109,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 21, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 22, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -350,6 +350,7 @@ struct Settings {
     float maxLevel = 3.0f;   // the installed level x the size factor never goes above this
     float maxBack = 2.0f, maxSide = 2.4f, maxHang = 2.3f, maxDown = 3.0f;   // each gravity shape's largest level
     float gravityLevel = 0.0f;    // [Gravity] fLevel: every body's breast gravity level (its own largest); 0: installed
+    float gravityShape = 0.0f;    // [Gravity] fGravityShape: the other parts' gravity shapes, x their clean settle
     bool stretchGuard = true;     // each body's breast gravity held to the strain the base body has at the same setting
     bool snapshots = false;       // log one body's collision positions every 5 s (for diagnosing collisions)
     bool proxies = false;         // watch the world-collision proxy bodies ([World] bProxies), read only
@@ -421,6 +422,8 @@ static void ReadSettings() {   // from g_iniPath
     // the breast gravity level for every body (its own largest level); 0 or no key: the installed level
     const float lvl = clampf(readF("fLevel", 0.0f), 0.0f, 8.0f);
     g_cfg.gravityLevel = lvl > 0.0f ? (lvl < 0.5f ? 0.5f : lvl) : 0.0f;
+    // the gravity shapes of every part but the breasts, x the settle each part's skin takes cleanly (0 = off)
+    g_cfg.gravityShape = clampf(readF("fGravityShape", g_cfg.gravityShape), 0.0f, 2.0f);
     g_cfg.fixedFrameRate = GetPrivateProfileIntA("Springs", "bFixedFrameRate", 1, g_iniPath) != 0;
     char buf[64];
     GetPrivateProfileStringA("Springs", "fSpringGravity", "", buf, sizeof(buf), g_iniPath);
@@ -544,6 +547,7 @@ struct PartTune {
     float limit = -1.0f; // fTravelLimit: the farthest it travels, x its Max + Max travel; -1: kPartTravelLimit
     float gravLevel = -1.0f;   // fGravityLevel ([Breasts]): every body's breast gravity level; -1: as installed
     float gravPose[4] = {-1.0f, -1.0f, -1.0f, -1.0f};   // fGravityBack, Side, Hang, Down; -1: the level
+    float shape = -1.0f;       // fGravityShape (not [Breasts]): this part's gravity shape; -1: TFPhysics.ini's
 };
 struct CharTune { std::uint32_t id = 0; bool player = false; float part[kNumParts] = {}; };
 struct OutfitTune { std::uint64_t slots = 0; std::uint32_t form = 0; float part[kNumParts] = {}; char name[40] = {}; };
@@ -648,6 +652,11 @@ static void ReadTuneFile(const char* file, TuneSettings& t) {
                     IniF(file, sec, kGravityPoseKey[k], g, 0.0f, 8.0f);
                     pt.gravPose[k] = g > 0.0f ? (g < 0.5f ? 0.5f : g) : -1.0f;
                 }
+            if (part != kPartBreast && IniHas(file, sec, "fGravityShape", b, sizeof(b))) {
+                float g = 0.0f;
+                IniF(file, sec, "fGravityShape", g, 0.0f, 2.0f);
+                pt.shape = g;
+            }
             IniF(file, sec, "fSwing", pt.swing, 0.0f, 3.0f);
             IniF(file, sec, "fSideToSide", pt.dir[0], 0.0f, 3.0f);
             IniF(file, sec, "fFrontBack", pt.dir[1], 0.0f, 3.0f);
@@ -1430,6 +1439,8 @@ struct ActorView {
     bool tuned = false;             // a character, outfit or planet factor in use for this body
     SpringEff eff[128];             // ... each spring as tuned, worked out once per update (EffOf)
     bool effDone[128] = {};
+    float settle[128][3];           // each spring's gravity shape this frame (COM axes, m): PreUpdate, AddSettle
+    bool settleOn = false;          // ... some part of this body has its gravity shape on
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -1980,6 +1991,10 @@ static void LogTuning(const char* what, const TuneSettings& t) {
                 const size_t sl = strlen(sag);
                 snprintf(sag + sl, sizeof(sag) - sl, ", gravity level x%.2f for every body", pt.gravLevel);
             }
+            if (pt.shape >= 0.0f) {
+                const size_t sl = strlen(sag);
+                snprintf(sag + sl, sizeof(sag) - sl, ", gravity shape x%.2f", pt.shape);
+            }
             if (pt.gravPose[0] > 0.0f || pt.gravPose[1] > 0.0f || pt.gravPose[2] > 0.0f || pt.gravPose[3] > 0.0f) {
                 static const char* const shape[4] = {"back", "side", "bent forward", "face down"};
                 strcat_s(sag, ", gravity level per shape");
@@ -2147,6 +2162,11 @@ static const SpringEff& EffOf(ActorView& v, int i, const TuneSettings& T) {
 // one part at a time past it, on the v0.7 mesh, walk, run and jump landing at 60 fps, the last step before the skin
 // folds over or passes through itself).  [Part] fTravelLimit overrides it.
 constexpr float kPartTravelLimit[kNumParts] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+// how far each part's soft bones may settle toward the floor under gravity, x 85% of their Max + Max travel
+// (the most a spring's own steady sag reaches on the Max springs): the skin's tested limit (tests\stretch_limit_settle.py:
+// one part at a time, on all fours, on the back and on a side, on the v0.7 mesh, the last step before the skin folds
+// over or passes through itself).  The breasts have gravity shapes of their own.
+constexpr float kPartSettleLimit[kNumParts] = {0.0f, 1.5f, 0.7f, 1.75f, 2.5f, 2.0f, 1.75f, 2.25f};
 static void PartCeilings(ActorView& v) {
     const TuneSettings& T = Tune();
     for (auto& c : v.partCeil)
@@ -2253,7 +2273,18 @@ static void PreUpdate(ActorView& v) {
         if (T.part[p].sag >= 0.0f) sagG[p] = T.part[p].sag;
         pull[p] = 9.81f * sagG[p] * (p == kPartBreast ? BreastSag(v) : v.gravity[p]);
     }
+    // each part's gravity shape level (every part but the breasts): its file's fGravityShape, else
+    // TFPhysics.ini's, x the body's gravity factor up to 1 (a thinner body, or a lighter planet, settles less)
+    float shapeLevel[kNumParts] = {};
+    v.settleOn = false;
+    for (int p = 1; p < kNumParts && g_cfg.enabled; ++p) {
+        const float lv = T.part[p].shape >= 0.0f ? T.part[p].shape : g_cfg.gravityShape;
+        const float f = v.gravity[p] < 1.0f ? (v.gravity[p] > 0.0f ? v.gravity[p] : 0.0f) : 1.0f;
+        shapeLevel[p] = lv * f;
+        v.settleOn |= shapeLevel[p] > 0.0f;
+    }
     for (int i = 0; i < v.nSprings; ++i) {
+        v.settle[i][0] = v.settle[i][1] = v.settle[i][2] = 0.0f;
         void* inst = v.springs[i];
         void* data = At<void*>(inst, 0x20);
         const SpringInfo* info = InfoOf(v, i);
@@ -2307,7 +2338,8 @@ static void PreUpdate(ActorView& v) {
         // holds a spring against its travel limit: its steady sag (pull / strength) stays within 85% of the 60 fps
         // limit (MaxDist / 60), so the spring still bounces both ways (a bigger size factor pinned the breasts)
         const float G = part >= 0 ? pull[part] : 0.0f;
-        if (G > 0.0f) {
+        const float shape = part > 0 ? shapeLevel[part] : 0.0f;
+        if (G > 0.0f || shape > 0.0f) {
             const float* strength = &At<float>(data, 0x20);
             float* vel = &At<float>(inst, 0xB0);
             const float r3[3] = {rel.x, rel.y, rel.z};
@@ -2316,15 +2348,56 @@ static void PreUpdate(ActorView& v) {
             const int n0 = static_cast<int>(std::ceil(dt * rate)), n = n0 < 1 ? 1 : n0;
             const float perLimit = g_cfg.fixedFrameRate ? 1.0f / 60.0f : dt / static_cast<float>(n);
             for (int k = 0; k < 3; ++k) {
-                if (j[k] < 0.05f) continue;   // a spring swinging (almost) nothing gets no sag either
-                const float most = 0.85f * e.travel[k] * perLimit * strength[k];
-                // / j: the swing (sag included) comes out x j, so the sag seen is G's (muscular: less swing, a little
-                // more sag); the guard still holds the spring's own sag inside its limit
-                float a = r3[k] * G / j[k];
-                a = a > most ? most : (a < -most ? -most : a);
-                vel[k] -= a * dt;
+                float seen = 0.0f;   // the spring's own steady sag on this axis, as its swing shows it
+                if (G > 0.0f && j[k] >= 0.05f) {   // a spring swinging (almost) nothing gets no sag either
+                    const float most = 0.85f * e.travel[k] * perLimit * strength[k];
+                    // / j: the swing (sag included) comes out x j, so the sag seen is G's (muscular: less swing, a little
+                    // more sag); the guard still holds the spring's own sag inside its limit
+                    float a = r3[k] * G / j[k];
+                    a = a > most ? most : (a < -most ? -most : a);
+                    vel[k] -= a * dt;
+                    if (strength[k] > 0.0f) seen = std::fabs(a) / strength[k] * j[k];
+                }
+                // the part's gravity shape: from the springs' own sag the rest of the way to the shape level
+                // x kPartSettleLimit x 85% of the bone's Max + Max travel (its 60 fps size), toward the change of
+                // gravity on this axis; put on after the game's update (AddSettle)
+                if (shape > 0.0f) {
+                    const float r = r3[k] > 1.0f ? 1.0f : (r3[k] < -1.0f ? -1.0f : r3[k]);
+                    const float want = std::fabs(shape * kPartSettleLimit[part] * 0.85f * info->maxTravel[k] / 60.0f * r);
+                    const float more = want - seen;
+                    if (more > 0.0f) v.settle[i][k] = r3[k] < 0.0f ? -more : more;
+                }
             }
         }
+    }
+}
+
+// each part's gravity shape (worked out per spring in PreUpdate, in COM's axes) onto its bone, in the bone's
+// parent frame like every offset added on top; one per bone (two springs on one bone: the first one's).  A bone of a
+// part with its shape on gets its offset every frame, a zero one too, so last frame's comes off when the body stands
+static void AddSettle(ActorView& v) {
+    void* done[128];
+    int nDone = 0;
+    const TuneSettings& T = Tune();
+    for (int i = 0; i < v.nSprings; ++i) {
+        const SpringInfo* info = InfoOf(v, i);
+        if (!info || info->part <= 0) continue;
+        const int part = info->part;
+        if (!((T.part[part].shape >= 0.0f ? T.part[part].shape : g_cfg.gravityShape) > 0.0f)) continue;
+        void* inst = v.springs[i];
+        void* target = At<void*>(inst, 0x18);
+        void* parent = target ? At<void*>(target, 0x38) : nullptr;
+        void* driver = At<void*>(inst, 0x10);
+        if (!parent || !driver) continue;
+        bool twice = false;
+        for (int q = 0; q < nDone && !twice; ++q) twice = done[q] == target;
+        if (twice) continue;
+        done[nDone++] = target;
+        const float* s = v.settle[i];
+        Vec3 w = {0, 0, 0};   // rows of a world rotation are the node's axes in the world
+        for (int k = 0; k < 3; ++k) w = Add(w, Scale(Row(driver, 0x80, k), s[k]));
+        const float add[3] = {Dot(w, Row(parent, 0x80, 0)), Dot(w, Row(parent, 0x80, 1)), Dot(w, Row(parent, 0x80, 2))};
+        v.AddTo(target, add);
     }
 }
 
@@ -2559,6 +2632,7 @@ static void PostUpdate(ActorView& v, int site) {
             }
         }
     }
+    if (v.settleOn) AddSettle(v);   // the other parts' gravity shapes, on top like the breasts'
     if (kCollisions && g_cfg.collision) {
         v.site = site;
         LARGE_INTEGER t0, t1;
@@ -4624,11 +4698,14 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
                  "breasts less)", g_cfg.gravityLevel);
     Log("shapes: side %.2f, face down %.2f, bent forward %.2f; breast gravity level %s; their largest levels: back x%.2f, "
         "side x%.2f, bent forward x%.2f, face down x%.2f; spring gravity breast %.3f, belly %.3f, butt %.3f, thighs %.3f, "
-        "hips %.3f, calves %.3f, arms %.3f, torso %.3f g; size scaling %d (large %.2f, small %.2f, override %.2f, level x "
-        "size at most %.2f); snapshots %d",
+        "hips %.3f, calves %.3f, arms %.3f, torso %.3f g; the other parts' gravity shapes x%.2f of their clean settle "
+        "(butt %.2f, belly %.2f, thighs %.2f, hips %.2f, calves %.2f, arms %.2f, torso %.2f x 85%% of the Max + Max "
+        "travel); size scaling %d (large %.2f, small %.2f, override %.2f, level x size at most %.2f); snapshots %d",
         g_cfg.sideSlump, g_cfg.faceDownSquash, g_cfg.hangShape, gravityLevel, g_cfg.maxBack, g_cfg.maxSide, g_cfg.maxHang,
         g_cfg.maxDown, g_cfg.springGravity, g_cfg.springGravityBelly, g_cfg.springGravityButt, g_cfg.springGravityThighs,
         g_cfg.springGravityHips, g_cfg.springGravityCalves, g_cfg.springGravityArms, g_cfg.springGravityTorso,
+        g_cfg.gravityShape, kPartSettleLimit[kPartButt], kPartSettleLimit[kPartBelly], kPartSettleLimit[kPartThigh],
+        kPartSettleLimit[kPartHip], kPartSettleLimit[kPartCalf], kPartSettleLimit[kPartArm], kPartSettleLimit[kPartTorso],
         g_cfg.sizeScaling, g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
     Log("collisions %d (measure only %d): soft size x%.2f, largest push breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, "
         "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d)",

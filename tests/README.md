@@ -102,6 +102,9 @@ Body-shape physics, against numbers worked out from the design, not from the plu
 - **Spring gravity and jiggle** per part (the hips' and the torso's gravity from a tuning file and from `[Springs]`),
   and the swing scaled per COM axis: one ceiling per part, a spring that skips a frame, two instances on one bone, a
   neutral body left alone.
+- **Gravity shapes of the other parts,** lying on the back: the settle on the hips with no spring sag (in COM's axes and
+  on the bone), topping up a spring's own sag, none past it (a zero offset handed on), a tuning file's level, a thin
+  and a heavy body, upside down held at 1 g, standing, `[Gravity] bEnabled=0`, and the breasts left to their own.
 - **The stretch guard:** the strain per body, the shape ceilings scaled by it, and the breast springs' gravity held.
 - **Settings:** the shipped INI's `[BodyShape]` keys, and garbage `[BodyShape]` values (NaN taken as the low end).
 - **Tuning each part,** written out from the design ([../docs/TUNING.md](../docs/TUNING.md)):
@@ -123,7 +126,7 @@ own reader, one line per setting. Part of what it prints:
 
 ```
 build\tests\tune_dump.exe "C:\Games\Starfield\Data\SFSE\Plugins\TFPhysics.ini"
-gravity enabled 1 level 5.0000 back 2.0000 side 2.4000 hang 2.3000 down 3.0000 maxlevel 3.0000 size 1
+gravity enabled 1 level 5.0000 back 2.0000 side 2.4000 hang 2.3000 down 3.0000 maxlevel 3.0000 size 1 shapes 1.0000
 springs Breasts 0.0600 Butt 0.0800 Belly 0.0400 Thighs 0.0450 Hips 0.0300 Calves 0.0320 Arms 0.0300 Torso 0.0130
 files 2 All.ini, Breasts.ini
 all Medium

@@ -9,6 +9,10 @@ Releases are the builds A-Body ships.
   A level's swing no longer moves the damping.
 - **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
 - **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
+- **Gravity shapes for the other parts:** lying down or on all fours, the soft bones of the butt, belly, thighs, hips,
+  calves, upper arms and torso settle toward the floor past what their springs allow, up to the settle each part's
+  skin takes cleanly (`kPartSettleLimit`), x `[Gravity] fGravityShape` or a part's `fGravityShape` (0 to 2; off unless
+  set). The shape tops up the springs' own steady sag, so the settle is the same with any springs.
 - **Breast gravity levels:**
   - `[Gravity] fLevel` sets every body's breast gravity level in place of the installed one. A tuning file's
     `[Breasts] fGravityLevel` replaces it while the game runs, and `fGravityBack`, `fGravitySide`, `fGravityHang` and

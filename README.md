@@ -23,7 +23,8 @@ match, it patches nothing and says why in its log.
   [docs/TUNING.md](docs/TUNING.md).
 - Breast gravity: one level for every body, or a level per shape (lying on the back, on a side, bent forward, face
   down), from the INI or the tuning files. The installed level's largest levels are settings.
-- Spring gravity in all 8 parts.
+- Spring gravity in all 8 parts, and gravity shapes for the butt, belly, thighs, hips, calves, arms and torso, sized
+  by the settle each part's skin takes cleanly.
 - Collisions:
   - upper arms, forearms, hands and thighs push the breasts;
   - forearms, hands and thighs push the belly;
@@ -74,7 +75,7 @@ None of the tests need the game ([tests/README.md](tests/README.md) has the deta
   - the tuning files: each level against the preset table, Ultra, the match, the travel limits, back to the
     installed springs bit for bit, the multipliers, characters, outfits, the planet, the files read again;
   - the breast gravity levels: the installed one held at its largest levels, one for every body and one per shape,
-    and the spring gravity of every part;
+    the spring gravity of every part and the other parts' gravity shapes;
   - the Address Library reader, and every start-up check on a fake game image.
 
   If it finds the game (through `STARFIELD_DIR`, or the usual Steam folders), it also runs the checks on the real

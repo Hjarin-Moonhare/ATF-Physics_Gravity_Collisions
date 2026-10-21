@@ -166,3 +166,10 @@ the code does instead.
   them. Multiplied by the breast size, it shows on bigger breasts as a higher level than the one set.
 - Fix: a set level is its own largest level. Only a body it would stretch more than a normal one gets less: x its
   breast size or its stretch guard's scale, the lower of the two, when that is below 1.
+
+**27. A part's gravity shape tops up its springs' own sag.**
+- Breaks: a fixed settle on top of the springs' sag goes past the skin's limit on springs with long travel and stops
+  short on springs with little.
+- Fix: per spring and COM axis, the shape is the rest of the way from the spring's steady sag, as its swing shows it,
+  to the part's settle limit. A bone of a part with its shape on gets an offset every frame, a zero one too, so last
+  frame's comes off when the body stands up.

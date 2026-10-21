@@ -62,6 +62,7 @@ swing makes the level's strength: how far the breasts and butt move against Real
 | `fTravelLimit` | 0.5 to 3 | the farthest the part travels, x its Max physics + Max extra jiggle travel; left out: `kPartTravelLimit` |
 | `fGravityLevel` | 0 to 8 | `[Breasts]` only: every body's breast gravity level in every shape, over `[Gravity] fLevel` and the installed level; 0 = not set ([Breast gravity levels](#breast-gravity-levels)) |
 | `fGravityBack`, `fGravitySide`, `fGravityHang`, `fGravityDown` | 0 to 8 | `[Breasts]` only: the level of one shape (lying on the back, on a side, bent forward and on all fours, face down), over every other level; 0 = not set |
+| `fGravityShape` | 0 to 2 | every part but the breasts: the part's gravity shape, x the settle its skin takes cleanly; left out: `[Gravity] fGravityShape` ([Gravity shapes of the other parts](#gravity-shapes-of-the-other-parts)) |
 | `fSwing` | 0 to 3 | x the part's swing |
 | `fUpDown`, `fSideToSide`, `fFrontBack` | 0 to 3 | x the swing on one COM axis: vertical, side, fore/aft |
 | `fSettle` | 0.25 to 4 | x the damping ratio: above 1 it settles sooner, below 1 it wobbles longer |
@@ -187,3 +188,31 @@ Each is in g, 0 to 0.3, and a part's `fSag` in a tuning file replaces it while t
 stops at 85% of its 60 fps travel on each COM axis, so more gravity past that adds nothing on that axis. On A-Body's Max
 springs a full tilt reaches that point at about: breasts 0.08, butt 0.079, belly 0.041, thighs 0.044, hips 0.028,
 calves 0.032, arms 0.028, torso 0.013 (the lowest over the extra jiggle levels).
+
+## Gravity shapes of the other parts
+
+Lying down, on a side or on all fours, the soft bones of the butt, belly, thighs, hips, calves, upper arms and torso
+settle toward the floor past their springs' travel. Per spring and per COM axis, the shape is the rest of the way from
+the spring's own steady sag (as its swing shows it) to
+
+    level x kPartSettleLimit[part] x 85% of the bone's Max physics + Max extra jiggle travel (60 fps size) x the change of gravity
+
+where the change of gravity is the one the springs' sag uses (each axis held at 1 g) and the level is the part's
+`fGravityShape` in a tuning file, else `[Gravity] fGravityShape` (default 0: off), x the body's gravity factor up to 1
+(a thinner body, or a lighter planet, settles less). It goes on after the game's update, like the breasts' shapes, in
+the bone's parent frame. With `[Gravity] bEnabled=0` the parts' shapes are off too.
+
+`kPartSettleLimit` (x 85% of the Max + Max travel), on A-Body's mesh: the last step before the skin folds over or
+passes through itself, one part at a time, on all fours, on the back and on a side:
+
+| Part | Limit | First break above it |
+|---|---|---|
+| Butt | 1.5 | the crotch, on all fours |
+| Belly | 0.7 | inside the navel, on all fours and on a side |
+| Thighs | 1.75 | the hips and pubis |
+| Hips | 2.5 | the arms (at the hips), lying on the back |
+| Calves | 2 | behind the knees, on all fours |
+| Arms | 1.75 | the shoulders and armpits, on a side |
+| Torso | 2.25 | the waist and back |
+
+At these limits the skin itself moves up to about 2 to 4 cm.

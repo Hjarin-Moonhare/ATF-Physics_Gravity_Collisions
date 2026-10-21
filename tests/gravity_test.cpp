@@ -479,7 +479,7 @@ int main() {
         fopen_s(&f1, ini, "wb");
         fputs("[Gravity]\r\nfHangCm=-3\r\nfPressCm=99\r\nfDeadZoneDeg=95\r\nfLyingStartDeg=80\r\nfLyingFullDeg=20\r\n"
               "fThighFlatStartDeg=200\r\nfThighFlatFullDeg=-5\r\nfSlump=abc\r\nfSideSlump=9\r\nfMaxBack=99\r\nfMaxSide=-3\r\n"
-              "fMaxHang=abc\r\nfMaxDown=nan\r\nfLevel=99\r\n[Springs]\r\nfSpringGravity=-1\r\n"
+              "fMaxHang=abc\r\nfMaxDown=nan\r\nfLevel=99\r\nfGravityShape=9\r\n[Springs]\r\nfSpringGravity=-1\r\n"
               "fSpringGravityBelly=7\r\nfSpringGravityHips=5\r\nfSpringGravityCalves=abc\r\nfSpringGravityArms=nan\r\n"
               "fSpringGravityTorso=-2\r\n[Size]\r\nfLarge=50\r\nfMaxLevel=99\r\n[Collision]\r\nfMaxPushBreastCm=-4\r\n"
               "fMaxPushGluteCm=55\r\nfMaxPushOtherCm=-4\r\nfDeadMaxAgeMs=99999\r\n", f1);
@@ -491,7 +491,7 @@ int main() {
                   c.springGravity == 0 && c.springGravityBelly == 0.3f && c.sizeLarge == 2 && c.maxLevel == 8 &&
                   c.maxBack == 8 && c.maxSide == 0.5f && c.maxHang == 0.5f && c.maxDown == 0.5f && c.gravityLevel == 8 &&
                   c.springGravityHips == 0.3f && c.springGravityCalves == 0 && c.springGravityArms == 0 &&
-                  c.springGravityTorso == 0 &&
+                  c.springGravityTorso == 0 && c.gravityShape == 2 &&
                   c.maxPush[0] == 0 && std::fabs(c.maxPush[3] - 0.10f) < 1e-7f && c.maxPushOther == 0 && c.deadMaxAge == 1.0f;
         // and the gravity math stays finite with them, in every orientation
         bool finite = true;
@@ -527,7 +527,7 @@ int main() {
         const Settings def{};
         const bool ok2 = g_cfg.sideSlump == def.sideSlump && g_cfg.enabled && g_cfg.collision && g_cfg.maxLevel == def.maxLevel &&
                          g_cfg.springGravityBelly == def.springGravityBelly && !g_cfg.snapshots && g_cfg.gravityLevel == 0 &&
-                         g_cfg.springGravityHips == 0 && g_cfg.springGravityTorso == 0;
+                         g_cfg.springGravityHips == 0 && g_cfg.springGravityTorso == 0 && g_cfg.gravityShape == 0;
         printf("%-26s %-34s defaults  %s\n", "no settings file", "built-in defaults", ok2 ? "OK" : "FAIL");
         g_fails += !ok2;
         FILE* f2 = nullptr;   // put the shipped file back for the check below
@@ -628,6 +628,8 @@ int main() {
                   !strcmp(got, "1") && g_cfg.steerTime == 1;
         keysFile &= GetPrivateProfileStringA("Gravity", "fLevel", "missing", got, sizeof(got), g_iniPath) &&
                   !strcmp(got, "0") && g_cfg.gravityLevel == 0.0f;   // the installed level
+        keysFile &= GetPrivateProfileStringA("Gravity", "fGravityShape", "missing", got, sizeof(got), g_iniPath) &&
+                  !strcmp(got, "0") && g_cfg.gravityShape == 0.0f;   // off
         keysFile &= g_cfg.springGravityHips == 0.0f && g_cfg.springGravityCalves == 0.0f && g_cfg.springGravityArms == 0.0f &&
                   g_cfg.springGravityTorso == 0.0f;   // read from the file
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&

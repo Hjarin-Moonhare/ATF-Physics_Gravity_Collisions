@@ -26,8 +26,9 @@ int main(int argc, char** argv) {
     LoadTuning(t);
     printf("ini %s\n", g_iniPath);
     const Settings& cfg = g_cfg;
-    printf("gravity enabled %d level %.4f back %.4f side %.4f hang %.4f down %.4f maxlevel %.4f size %d\n", cfg.enabled ? 1 : 0,
-           cfg.gravityLevel, cfg.maxBack, cfg.maxSide, cfg.maxHang, cfg.maxDown, cfg.maxLevel, cfg.sizeScaling ? 1 : 0);
+    printf("gravity enabled %d level %.4f back %.4f side %.4f hang %.4f down %.4f maxlevel %.4f size %d shapes %.4f\n",
+           cfg.enabled ? 1 : 0, cfg.gravityLevel, cfg.maxBack, cfg.maxSide, cfg.maxHang, cfg.maxDown, cfg.maxLevel,
+           cfg.sizeScaling ? 1 : 0, cfg.gravityShape);
     const float sag[kNumParts] = {cfg.springGravity, cfg.springGravityButt, cfg.springGravityBelly, cfg.springGravityThighs,
                                   cfg.springGravityHips, cfg.springGravityCalves, cfg.springGravityArms, cfg.springGravityTorso};
     printf("springs");
@@ -40,9 +41,10 @@ int main(int argc, char** argv) {
     for (int p = 0; p < kNumParts; ++p) {
         const PartTune& pt = t.part[p];
         printf("part %s level %s match %d swing %.4f side %.4f frontback %.4f updown %.4f settle %.4f bounce %.4f sag %.4f "
-               "limit %.4f gravity %.4f back %.4f sideways %.4f hang %.4f down %.4f\n",
+               "limit %.4f gravity %.4f back %.4f sideways %.4f hang %.4f down %.4f shape %.4f\n",
                kPartSection[p], LevelText(pt.level), pt.match ? 1 : 0, pt.swing, pt.dir[0], pt.dir[1], pt.dir[2], pt.settle,
-               pt.bounce, pt.sag, pt.limit, pt.gravLevel, pt.gravPose[0], pt.gravPose[1], pt.gravPose[2], pt.gravPose[3]);
+               pt.bounce, pt.sag, pt.limit, pt.gravLevel, pt.gravPose[0], pt.gravPose[1], pt.gravPose[2], pt.gravPose[3],
+               pt.shape);
     }
     for (int b = 0; b < kNumPresetBones; ++b)
         if (t.bone[b] != 1.0f) printf("bone %s %.4f\n", kPresetBones[b].name, t.bone[b]);

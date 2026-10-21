@@ -58,7 +58,8 @@ reset (slot 2) when it isn't. Three call sites call that loop:
    - a tuned part's springs (strength, MaxDist) go into its records, with the instance's sub-step rate (a level's swing
      stays out of the damping);
    - each spring's MaxDist is set so its cap is the 60 fps size;
-   - gravity goes into each spring's velocity (the part's `[Springs]` key, or its `fSag`);
+   - gravity goes into each spring's velocity (the part's `[Springs]` key, or its `fSag`), and each spring's share of
+     its part's gravity shape is worked out;
    - damping follows the body shape and the tuning.
 4. **The game's own loop.** The springs and correctives run.
 5. `PostUpdate`:
@@ -66,6 +67,7 @@ reset (slot 2) when it isn't. Three call sites call that loop:
      thigh check and the per-bone shapes on top of the springs. Each shape takes its level: one set for every body
      or for the shape is its own largest, and the installed one is held at `[Gravity] fMaxBack` .. `fMaxDown`;
    - `ScaleJiggle` scales each spring's swing by the body shape and the tuning;
+   - `AddSettle` puts the other parts' gravity shapes on their bones;
    - `Collide` pushes the soft bones;
    - `AddOnTopAll` writes the per-bone results;
    - `Share` publishes this body's shapes for the bodies near it.
