@@ -74,10 +74,11 @@ In the per-actor update (`0x15cb6e0`, ID 91213):
 - **Part bones:** an armor addon's NIF (a body's skin is one) can bring its own bones: NiNodes with a
   `ParentBoneName` string extra data. The attach (ID 125302, through 125303) puts each under the named bone of the
   character's skeleton, matching the name in any case, when the part's root has BSX bit 0x10000. The root's flag
-  0x20000000, the child order and `sgoKeep` are not read.
+  0x20000000, the child order and `sgoKeep` are not read. On A-Body's body, 156 part bones under `C_Chest` and the
+  nipples all end up under their named bones (confirmed in game).
 - **Bones per skinned shape:** at most 255. The skinning shaders keep the count in 8 bits, with a 256-slot bone
   buffer; a count over 255 wraps without an error. The largest of the game's own meshes has 143 (the Va'ruun Admin
-  cape).
+  cape). A body mesh with 249 bones draws and skins (confirmed in game).
 - **Weights per vertex:** at most 8 (`shaderspc_dx12_105.fxp`, the game's one shader pack). A shape with 65,536
   vertices or more isn't skinned.
 
@@ -91,7 +92,5 @@ In the per-actor update (`0x15cb6e0`, ID 91213):
 6. **A spring's travel cap is MaxDist × the sub-step time,** so the same record moves twice as far at 30 fps as at 60.
 7. **Every patch moves the code.** A raw RVA breaks with each one; an ID survives, but struct offsets aren't covered by
    the Address Library.
-8. **A shape with more than 143 bones may not draw right:** the code that packs a shape's bones for the shaders is
-   unread, and the game's own meshes stop at 143.
-9. **A body's part bones may not attach:** the attach was read from the exe. The plugin dents only a body whose dent
-   bones were all found, so a missing one leaves that body undented.
+8. **250 to 255 bones on one shape are unproven:** the code that packs a shape's bones for the shaders is unread;
+   249 draw.

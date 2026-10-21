@@ -86,7 +86,7 @@ A body can ship a dent rig; without one nothing changes.
   place the skin moves exactly as before. Weight taken from a bone that moves apart from the parent moves the skin
   even with no contact (the spine under a breast: up to 8 mm in a bend).
 - A vertex has at most 8 weights. A skinned shape has at most 255 bones (the skinning shaders' limit); the game's own
-  meshes use up to 143.
+  meshes use up to 143, and A-Body's body with 249 draws in game.
 - A-Body's rigs: a breast's dent bones ride on `C_Chest`, plus one on the nipple (on `L_Nipple` / `R_Nipple`); a
   glute's on the hips; a thigh's on the strongest of the thigh, its twist bones and the hips at each point.
 
