@@ -804,6 +804,32 @@ int main() {
             const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
             SetRows(com9, upright);
         }
+        {   // the same from TFPhysics.ini [Springs] for the hips and the torso (no sag installed), lying on the back
+            const Vec3 onBack[3] = {{1, 0, 0}, {0, 0, 1}, {0, -1, 0}};
+            SetRows(com9, onBack);
+            const float stiff[3] = {1000, 1000, 1000};
+            const PresetSpring& hp = kPresetBones[bone("TF_Hip_Outer_L")].s[0][0];
+            const PresetSpring& fp = kPresetBones[bone("TF_Flank_L")].s[0][0];
+            Spring h = NewSpring(com9, pecs9, "TF_Hip_Outer_L", hp.maxDist, stiff, hp.damping, zero);
+            Spring fl = NewSpring(com9, pecs9, "TF_Flank_L", fp.maxDist, stiff, fp.damping, zero);
+            const Settings keep = g_cfg;
+            g_cfg.springGravityHips = 0.05f;
+            g_cfg.springGravityTorso = 0.02f;
+            ActorView v;
+            v.com = com9;
+            v.springs[v.nSprings++] = h.inst;
+            v.springs[v.nSprings++] = fl.inst;
+            PreUpdate(v);
+            g_cfg = keep;
+            const float* vh = reinterpret_cast<const float*>(h.inst + 0xB0);
+            const float* vf = reinterpret_cast<const float*>(fl.inst + 0xB0);
+            const float Gh = 9.81f * 0.05f, Gt = 9.81f * 0.02f;
+            snprintf(d, sizeof(d), "hips 0.05 g: fore/aft %.6f m/s (want %.6f), torso 0.02 g: fore/aft %.6f (want %.6f)", vh[1],
+                     Gh * dt9, vf[1], Gt * dt9);
+            Report("[Springs] hips and torso", d, std::fabs(vh[1] - Gh * dt9) < 1e-7f && std::fabs(vf[1] - Gt * dt9) < 1e-7f);
+            const Vec3 upright[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            SetRows(com9, upright);
+        }
         {   // per character, per outfit and per planet (the reads on a fake character and record)
             g_formIdOk = g_wornOk = g_gravityScaleOk = true;
             auto person = [&](bool player, std::uint32_t ref, std::uint32_t base) {
@@ -921,8 +947,9 @@ int main() {
             put(".TFPhysics.ini", "[Tuning]\r\nbPlanetGravity=0\r\nfPlanetGravity=7\r\nbOutfits=1\r\n");
             put("All.ini", "[All]\r\nsLevel=Lower\r\n");
             put("Breasts.ini", "[Breasts]\r\nsLevel=High\r\nfSwing=1.2\r\nfUpDown=0.5\r\nfSettle=2\r\nfBounceSpeed=1.1\r\nfSag=0.08\r\n"
-                "TF_Breast_Lower_L=0.7\r\nTF_Glute_Lower_L=0.1\r\n");
-            put("Butt.ini", "[Butt]\r\nsLevel=Banana\r\nfSwing=nan\r\nfBounceSpeed=9\r\n");
+                "TF_Breast_Lower_L=0.7\r\nTF_Glute_Lower_L=0.1\r\nfGravityBack=4\r\nfGravitySide=0\r\nfGravityHang=99\r\n"
+                "fGravityDown=0.1\r\n");
+            put("Butt.ini", "[Butt]\r\nsLevel=Banana\r\nfSwing=nan\r\nfBounceSpeed=9\r\nfGravityBack=3\r\n");
             put("Outfits.ini", "[Outfit Spacesuit upper]\r\nsSlots=35, 36\r\nfBreasts=0.5\r\n[Outfit My suit]\r\nsForm=0001A2B3\r\n"
                 "fAll=0.7\r\n[Outfit nothing]\r\nfAll=0.1\r\n");
             put("Characters.ini", "[Player]\r\nfBreasts=1.3\r\n[NPC 0001ABCD]\r\nfAll=0.8\r\n[NPC zz]\r\nfAll=0.2\r\n");
@@ -936,7 +963,9 @@ int main() {
                               u.swing == 0.0f && u.bounce == 2.0f && !t.planet && t.planetAmount == 1.0f && t.outfitsOn &&
                               t.nOutfits == 2 && t.outfits[0].slots == (1ull << 35 | 1ull << 36) && t.outfits[1].form == 0x1A2B3 &&
                               t.outfits[1].part[kPartCalf] == 0.7f && t.nChars == 2 && t.chars[0].player &&
-                              t.chars[0].part[kPartBreast] == 1.3f && t.chars[1].id == 0x1ABCD && t.springs && t.scaled && t.damping;
+                              t.chars[0].part[kPartBreast] == 1.3f && t.chars[1].id == 0x1ABCD && t.springs && t.scaled && t.damping &&
+                              b.gravPose[0] == 4.0f && b.gravPose[1] == -1.0f && b.gravPose[2] == 8.0f && b.gravPose[3] == 0.5f &&
+                              u.gravPose[0] == -1.0f;   // per shape, the breasts only
             snprintf(d, sizeof(d), "%d files (%s); breasts %s x%.1f, the butt's level from [All], garbage held", t.files, t.fileNames,
                      b.level == kLevelHigh ? "High" : "WRONG", b.swing);
             Report("the tuning files", d, read);

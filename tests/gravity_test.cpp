@@ -72,13 +72,15 @@ struct Expect { Vec3 anchor[2]; Vec3 bone[2][4]; };   // cm at level 1: anchor i
 
 static void Check(const char* what, Rig& r, const Pose& p, const Expect& e, float level, float size,
                   const Vec3* thighAxis = nullptr,   // with thigh springs, their thigh's X axis in the world
-                  float kWant = -1) {                // the effective level expected (default level x size)
+                  float kWant = -1,                  // the effective level expected (default level x size)
+                  float ceil = 1.0f) {               // the body's ceiling scale (the stretch guard's)
     SetRows(r.chest, p.chest);
     SetRows(r.com, p.com);
     for (int s = 0; s < 2; ++s) memcpy(r.pecs[s] + 0x70, r.rest[s], 12);   // the game's PoseDeformers reset the anchors
     ActorView v;
     v.level = level;
     v.size = size;
+    v.ceilScale = ceil;
     v.com = r.com;
     for (int s = 0; s < 2; ++s) {
         v.anchors[s].node = r.pecs[s];
@@ -171,8 +173,8 @@ int main() {
     Check("x2 x size 1.5: face down x3.0", r, kFaceDown, down, 2.0f, 1.5f, nullptr, 3.0f);
     Check("x2 x size 0.5 (Small): x1.0", r, kBentOver, bent, 2.0f, 0.5f);
     // the shapes' largest levels from the INI ([Gravity] fMaxBack .. fMaxDown, [Size] fMaxLevel up to 8), and
-    // a tuned level for every body ([Breasts] fGravityLevel): it replaces the installed level x the size, and each
-    // shape still stops at its largest level
+    // a tuned level for every body ([Breasts] fGravityLevel) in place of the installed one (what a normal or
+    // bigger breast gets, its own largest level; a smaller breast gets it x its size)
     {
         const Settings keep = g_cfg;
         g_cfg.maxBack = g_cfg.maxSide = g_cfg.maxHang = g_cfg.maxDown = 6.0f;
@@ -183,10 +185,49 @@ int main() {
         tuned.part[kPartBreast].gravLevel = 5.0f;
         Check("tuned level x5: slump x5", r, kOnBack, back, 1.0f, 1.0f, nullptr, 5.0f);
         Check("tuned level x5: side x5", r, kOnLeft, left, 1.0f, 1.0f, nullptr, 5.0f);
-        Check("tuned x5, size 0.5: teardrop x5", r, kBentOver, bent, 1.0f, 0.5f, nullptr, 5.0f);
+        Check("tuned x5, size 0.5: teardrop x2.5", r, kBentOver, bent, 1.0f, 0.5f, nullptr, 2.5f);
+        Check("tuned x5, size 1.5: x5", r, kOnLeft, left, 1.0f, 1.5f, nullptr, 5.0f);
         g_cfg = keep;
-        Check("tuned x5, largest 2.0: held x2.0", r, kOnBack, back, 1.0f, 1.0f, nullptr, 2.0f);
+        Check("tuned x5 over largest 2.0: x5", r, kOnBack, back, 1.0f, 1.0f, nullptr, 5.0f);
         tuned = TuneSettings{};
+    }
+    // [Gravity] fLevel, one level for every body in place of the installed one, a tuned level over it, and a
+    // level per shape ([Breasts] fGravityBack .. fGravityDown) over both: each is what a normal or bigger breast gets
+    // and its own largest level; a smaller breast gets it x its size, a thinner one x its ceiling scale (the lower)
+    {
+        const Settings keep = g_cfg;
+        g_cfg.maxBack = g_cfg.maxSide = g_cfg.maxHang = g_cfg.maxDown = 2.0f;   // hold the installed level only
+        g_cfg.maxLevel = 3.0f;
+        g_cfg.gravityLevel = 2.5f;
+        Check("fLevel x2.5 over installed x1", r, kOnBack, back, 1.0f, 1.0f, nullptr, 2.5f);
+        Check("fLevel x2.5, size 1.5: x2.5", r, kOnLeft, left, 1.0f, 1.5f, nullptr, 2.5f);
+        Check("fLevel x2.5, size 0.6: x1.5", r, kFaceDown, down, 1.0f, 0.6f, nullptr, 1.5f);
+        Check("fLevel x2.5, ceiling x0.8: x2", r, kBentOver, bent, 1.0f, 1.5f, nullptr, 2.0f, 0.8f);
+        Check("fLevel x2.5, size 0.5, ceiling 0.8", r, kOnBack, back, 1.0f, 0.5f, nullptr, 1.25f, 0.8f);
+        g_cfg.gravityLevel = 6.25f;
+        Check("fLevel x6.25 over largest 2.0", r, kOnRight, right, 1.0f, 1.25f, nullptr, 6.25f);
+        g_cfg.gravityLevel = 2.5f;
+        TuneSettings& tuned = g_tunes[g_tuneNow.load()];
+        tuned = TuneSettings{};
+        tuned.part[kPartBreast].gravLevel = 4.0f;
+        Check("tuned x4 over fLevel x2.5", r, kBentOver, bent, 1.0f, 1.0f, nullptr, 4.0f);
+        tuned.part[kPartBreast].gravPose[0] = 3.0f;   // back
+        tuned.part[kPartBreast].gravPose[2] = 5.0f;   // bent forward
+        Check("per shape: back x3", r, kOnBack, back, 1.0f, 1.0f, nullptr, 3.0f);
+        Check("per shape: side keeps x4", r, kOnRight, right, 1.0f, 1.0f, nullptr, 4.0f);
+        Check("per shape: bent forward x5", r, kBentOver, bent, 1.0f, 1.0f, nullptr, 5.0f);
+        Check("per shape: face down keeps x4", r, kFaceDown, down, 1.0f, 1.0f, nullptr, 4.0f);
+        Check("per shape x3 x size 0.5", r, kOnBack, back, 1.0f, 0.5f, nullptr, 1.5f);
+        Check("per shape x5, size 1.25: x5", r, kBentOver, bent, 1.0f, 1.25f, nullptr, 5.0f);
+        tuned = TuneSettings{};
+        g_cfg.gravityLevel = 0.0f;
+        Check("fLevel 0: the installed level", r, kOnBack, back, 2.0f, 1.0f, nullptr, 2.0f);
+        tuned.part[kPartBreast].gravPose[1] = 4.0f;   // a side only, over the installed level
+        Check("per shape x4, the rest installed", r, kOnLeft, left, 1.0f, 1.25f, nullptr, 4.0f);
+        Check("... back: installed x1 x 1.25", r, kOnBack, back, 1.0f, 1.25f, nullptr, 1.25f);
+        tuned = TuneSettings{};
+        Check("installed x2 x 1.5: held x2.0", r, kOnBack, back, 2.0f, 1.5f, nullptr, 2.0f);
+        g_cfg = keep;
     }
 
     const Vec3 thighDown = {0, 0, -1}, thighFlat = {0, 1, 0};
@@ -438,8 +479,9 @@ int main() {
         fopen_s(&f1, ini, "wb");
         fputs("[Gravity]\r\nfHangCm=-3\r\nfPressCm=99\r\nfDeadZoneDeg=95\r\nfLyingStartDeg=80\r\nfLyingFullDeg=20\r\n"
               "fThighFlatStartDeg=200\r\nfThighFlatFullDeg=-5\r\nfSlump=abc\r\nfSideSlump=9\r\nfMaxBack=99\r\nfMaxSide=-3\r\n"
-              "fMaxHang=abc\r\nfMaxDown=nan\r\n[Springs]\r\nfSpringGravity=-1\r\n"
-              "fSpringGravityBelly=7\r\n[Size]\r\nfLarge=50\r\nfMaxLevel=99\r\n[Collision]\r\nfMaxPushBreastCm=-4\r\n"
+              "fMaxHang=abc\r\nfMaxDown=nan\r\nfLevel=99\r\n[Springs]\r\nfSpringGravity=-1\r\n"
+              "fSpringGravityBelly=7\r\nfSpringGravityHips=5\r\nfSpringGravityCalves=abc\r\nfSpringGravityArms=nan\r\n"
+              "fSpringGravityTorso=-2\r\n[Size]\r\nfLarge=50\r\nfMaxLevel=99\r\n[Collision]\r\nfMaxPushBreastCm=-4\r\n"
               "fMaxPushGluteCm=55\r\nfMaxPushOtherCm=-4\r\nfDeadMaxAgeMs=99999\r\n", f1);
         fclose(f1);
         LoadSettings();
@@ -447,7 +489,9 @@ int main() {
         bool ok = c.hangCm == 0 && c.pressCm == 5 && c.deadZoneDeg == 60 && c.lyingFullDeg > c.lyingStartDeg &&
                   c.thighFlatFullDeg > c.thighFlatStartDeg && c.thighFlatFullDeg <= 90 && c.slump == 0 && c.sideSlump == 1.5f &&
                   c.springGravity == 0 && c.springGravityBelly == 0.3f && c.sizeLarge == 2 && c.maxLevel == 8 &&
-                  c.maxBack == 8 && c.maxSide == 0.5f && c.maxHang == 0.5f && c.maxDown == 0.5f &&
+                  c.maxBack == 8 && c.maxSide == 0.5f && c.maxHang == 0.5f && c.maxDown == 0.5f && c.gravityLevel == 8 &&
+                  c.springGravityHips == 0.3f && c.springGravityCalves == 0 && c.springGravityArms == 0 &&
+                  c.springGravityTorso == 0 &&
                   c.maxPush[0] == 0 && std::fabs(c.maxPush[3] - 0.10f) < 1e-7f && c.maxPushOther == 0 && c.deadMaxAge == 1.0f;
         // and the gravity math stays finite with them, in every orientation
         bool finite = true;
@@ -471,7 +515,8 @@ int main() {
                 for (int k = 0; k < 3; ++k) finite &= std::isfinite(t[k]) && std::fabs(t[k]) < 1;
             }
             for (int i = 0; i < v.nAdd; ++i)
-                for (int k = 0; k < 3; ++k) finite &= std::isfinite(v.add[i][k]) && std::fabs(v.add[i][k]) < 0.2f;
+                for (int k = 0; k < 3; ++k)   // (fLevel 99 is held at 8, its own largest level: x the shapes at 1.5, 26 cm)
+                    finite &= std::isfinite(v.add[i][k]) && std::fabs(v.add[i][k]) < 0.3f;
         }
         ok &= finite;
         printf("%-26s %-34s every value held in range, offsets finite  %s\n", "garbage settings", "limits", ok ? "OK" : "FAIL");
@@ -481,7 +526,8 @@ int main() {
         LoadSettings();
         const Settings def{};
         const bool ok2 = g_cfg.sideSlump == def.sideSlump && g_cfg.enabled && g_cfg.collision && g_cfg.maxLevel == def.maxLevel &&
-                         g_cfg.springGravityBelly == def.springGravityBelly && !g_cfg.snapshots;
+                         g_cfg.springGravityBelly == def.springGravityBelly && !g_cfg.snapshots && g_cfg.gravityLevel == 0 &&
+                         g_cfg.springGravityHips == 0 && g_cfg.springGravityTorso == 0;
         printf("%-26s %-34s defaults  %s\n", "no settings file", "built-in defaults", ok2 ? "OK" : "FAIL");
         g_fails += !ok2;
         FILE* f2 = nullptr;   // put the shipped file back for the check below
@@ -562,6 +608,8 @@ int main() {
         g_cfg = Settings{};
         g_cfg.sideSlump = g_cfg.faceDownSquash = g_cfg.hangShape = -1;   // must all be read from the file
         g_cfg.springGravityBelly = g_cfg.springGravityButt = -1;
+        g_cfg.springGravityHips = g_cfg.springGravityCalves = -1;   // the other parts' too
+        g_cfg.springGravityArms = g_cfg.springGravityTorso = -1;
         g_cfg.maxPush[3] = -1;   // the glute cap must come from the file too
         g_cfg.maxPushOther = g_cfg.deadMaxAge = -1;   // and the other-body cap and the dead bodies' age limit
         LoadSettings();
@@ -578,6 +626,10 @@ int main() {
                   !strcmp(got, "1") && g_cfg.steerOnce;
         keysFile &= GetPrivateProfileStringA("World", "iSteerTime", "missing", got, sizeof(got), g_iniPath) &&
                   !strcmp(got, "1") && g_cfg.steerTime == 1;
+        keysFile &= GetPrivateProfileStringA("Gravity", "fLevel", "missing", got, sizeof(got), g_iniPath) &&
+                  !strcmp(got, "0") && g_cfg.gravityLevel == 0.0f;   // the installed level
+        keysFile &= g_cfg.springGravityHips == 0.0f && g_cfg.springGravityCalves == 0.0f && g_cfg.springGravityArms == 0.0f &&
+                  g_cfg.springGravityTorso == 0.0f;   // read from the file
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&
                         g_cfg.slump == 1.0f && g_cfg.springGravity == 0.06f && g_cfg.springGravityBelly == 0.03f &&
                         g_cfg.springGravityButt == 0.04f && g_cfg.springGravityThighs == 0.0f && g_cfg.sizeScaling &&

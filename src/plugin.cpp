@@ -109,7 +109,7 @@ constexpr std::uint32_t kAddressLibraryV2 = 1 << 2;   // SFSEPluginVersionData::
 constexpr std::uint32_t kLayout_1_14_70 = 1 << 3;     // SFSEPluginVersionData::kStructureIndependence_1_14_70_Layout
 
 extern "C" __declspec(dllexport) SFSEPluginVersionData SFSEPlugin_Version = {
-    1, 20, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
+    1, 21, "TF Physics", "TF_Skeleton", kAddressLibraryV2, kLayout_1_14_70, {kRuntime_1_16_244, 0}, 0, 0, 0};
 
 // ------------------------------------------------------------------ game addresses (Address Library) and layouts
 // every game address is an Address Library ID, plus an offset for a place inside a function, looked up at
@@ -342,12 +342,14 @@ struct Settings {
     bool fixedFrameRate = true;   // keep every A-Body spring's travel limit at its 60 fps size at any frame rate
     float springGravity = 0.06f;  // gravity in the breast springs, as a fraction of 1 g (0 = off)
     float springGravityBelly = 0.03f, springGravityButt = 0.04f, springGravityThighs = 0.0f;   // the same, other parts
+    float springGravityHips = 0.0f, springGravityCalves = 0.0f, springGravityArms = 0.0f, springGravityTorso = 0.0f;
     bool sizeScaling = true;      // breast gravity follows the breast size sliders (sfee's TF_BreastsLarge / Small)
     float sizeLarge = 0.5f;       // gravity x (1 + sizeLarge x TF_BreastsLarge - sizeSmall x TF_BreastsSmall)
     float sizeSmall = 0.5f;
     float sizeOverride = 0.0f;    // > 0: this factor for every body instead (to try the scaling by hand)
     float maxLevel = 3.0f;   // the installed level x the size factor never goes above this
     float maxBack = 2.0f, maxSide = 2.4f, maxHang = 2.3f, maxDown = 3.0f;   // each gravity shape's largest level
+    float gravityLevel = 0.0f;    // [Gravity] fLevel: every body's breast gravity level (its own largest); 0: installed
     bool stretchGuard = true;     // each body's breast gravity held to the strain the base body has at the same setting
     bool snapshots = false;       // log one body's collision positions every 5 s (for diagnosing collisions)
     bool proxies = false;         // watch the world-collision proxy bodies ([World] bProxies), read only
@@ -387,11 +389,7 @@ struct Settings {
 static Settings g_cfg;
 static char g_iniPath[MAX_PATH] = {};
 
-static void LoadSettings() {
-    char dll[MAX_PATH] = {};
-    GetModuleFileNameA(reinterpret_cast<HMODULE>(&__ImageBase), dll, MAX_PATH);
-    if (char* slash = strrchr(dll, '\\')) *slash = 0;
-    snprintf(g_iniPath, sizeof(g_iniPath), "%s\\TFPhysics.ini", dll);
+static void ReadSettings() {   // from g_iniPath
     auto readF = [](const char* key, float def) {
         char buf[64];
         GetPrivateProfileStringA("Gravity", key, "", buf, sizeof(buf), g_iniPath);
@@ -420,6 +418,9 @@ static void LoadSettings() {
     g_cfg.maxSide = clampf(readF("fMaxSide", g_cfg.maxSide), 0.5f, 8.0f);
     g_cfg.maxHang = clampf(readF("fMaxHang", g_cfg.maxHang), 0.5f, 8.0f);
     g_cfg.maxDown = clampf(readF("fMaxDown", g_cfg.maxDown), 0.5f, 8.0f);
+    // the breast gravity level for every body (its own largest level); 0 or no key: the installed level
+    const float lvl = clampf(readF("fLevel", 0.0f), 0.0f, 8.0f);
+    g_cfg.gravityLevel = lvl > 0.0f ? (lvl < 0.5f ? 0.5f : lvl) : 0.0f;
     g_cfg.fixedFrameRate = GetPrivateProfileIntA("Springs", "bFixedFrameRate", 1, g_iniPath) != 0;
     char buf[64];
     GetPrivateProfileStringA("Springs", "fSpringGravity", "", buf, sizeof(buf), g_iniPath);
@@ -434,6 +435,10 @@ static void LoadSettings() {
     g_cfg.springGravityBelly = readS("Springs", "fSpringGravityBelly", g_cfg.springGravityBelly, 0, 0.3f);
     g_cfg.springGravityButt = readS("Springs", "fSpringGravityButt", g_cfg.springGravityButt, 0, 0.3f);
     g_cfg.springGravityThighs = readS("Springs", "fSpringGravityThighs", g_cfg.springGravityThighs, 0, 0.3f);
+    g_cfg.springGravityHips = readS("Springs", "fSpringGravityHips", g_cfg.springGravityHips, 0, 0.3f);
+    g_cfg.springGravityCalves = readS("Springs", "fSpringGravityCalves", g_cfg.springGravityCalves, 0, 0.3f);
+    g_cfg.springGravityArms = readS("Springs", "fSpringGravityArms", g_cfg.springGravityArms, 0, 0.3f);
+    g_cfg.springGravityTorso = readS("Springs", "fSpringGravityTorso", g_cfg.springGravityTorso, 0, 0.3f);
     g_cfg.sizeScaling = GetPrivateProfileIntA("Size", "bEnabled", 1, g_iniPath) != 0;
     g_cfg.sizeLarge = readS("Size", "fLarge", g_cfg.sizeLarge, 0, 2);
     g_cfg.sizeSmall = readS("Size", "fSmall", g_cfg.sizeSmall, 0, 0.9f);
@@ -500,6 +505,13 @@ static void LoadSettings() {
         g_cfg.steer = false;
     }
 }
+static void LoadSettings() {   // TFPhysics.ini next to the DLL
+    char dll[MAX_PATH] = {};
+    GetModuleFileNameA(reinterpret_cast<HMODULE>(&__ImageBase), dll, MAX_PATH);
+    if (char* slash = strrchr(dll, '\\')) *slash = 0;
+    snprintf(g_iniPath, sizeof(g_iniPath), "%s\\TFPhysics.ini", dll);
+    ReadSettings();
+}
 
 // ------------------------------------------------------------------ tuning each part
 // On top of the installed physics: TFPhysics.ini [Tuning] and every .ini file in the TFPhysics folder next to it
@@ -522,6 +534,8 @@ static void LoadSettings() {
 enum { kLevelPreset = -1, kLevelOff = kNumLevels };
 static_assert(kNumMatchParts == kNumParts, "preset_data.h's match table lists the parts of body_shape_data.h");
 static const char* const kPartSection[kNumParts] = {"Breasts", "Butt", "Belly", "Thighs", "Hips", "Calves", "Arms", "Torso"};
+// the breast gravity shapes, in PostUpdate's order: lying on the back, on a side, bent forward, face down
+static const char* const kGravityPoseKey[4] = {"fGravityBack", "fGravitySide", "fGravityHang", "fGravityDown"};
 struct PartTune {
     int level = kLevelPreset;
     float swing = 1.0f, dir[3] = {1.0f, 1.0f, 1.0f}, settle = 1.0f, bounce = 1.0f;   // dir: side, fore/aft, up
@@ -529,6 +543,7 @@ struct PartTune {
     bool match = false;  // bMatchLevel: the part moves the level's strength (kLevelMatch), not the presets' share
     float limit = -1.0f; // fTravelLimit: the farthest it travels, x its Max + Max travel; -1: kPartTravelLimit
     float gravLevel = -1.0f;   // fGravityLevel ([Breasts]): every body's breast gravity level; -1: as installed
+    float gravPose[4] = {-1.0f, -1.0f, -1.0f, -1.0f};   // fGravityBack, Side, Hang, Down; -1: the level
 };
 struct CharTune { std::uint32_t id = 0; bool player = false; float part[kNumParts] = {}; };
 struct OutfitTune { std::uint64_t slots = 0; std::uint32_t form = 0; float part[kNumParts] = {}; char name[40] = {}; };
@@ -627,6 +642,12 @@ static void ReadTuneFile(const char* file, TuneSettings& t) {
                 IniF(file, sec, "fGravityLevel", g, 0.0f, 8.0f);
                 pt.gravLevel = g > 0.0f ? (g < 0.5f ? 0.5f : g) : -1.0f;
             }
+            for (int k = 0; part == kPartBreast && k < 4; ++k)   // per shape; 0: the level
+                if (IniHas(file, sec, kGravityPoseKey[k], b, sizeof(b))) {
+                    float g = 0.0f;
+                    IniF(file, sec, kGravityPoseKey[k], g, 0.0f, 8.0f);
+                    pt.gravPose[k] = g > 0.0f ? (g < 0.5f ? 0.5f : g) : -1.0f;
+                }
             IniF(file, sec, "fSwing", pt.swing, 0.0f, 3.0f);
             IniF(file, sec, "fSideToSide", pt.dir[0], 0.0f, 3.0f);
             IniF(file, sec, "fFrontBack", pt.dir[1], 0.0f, 3.0f);
@@ -1943,12 +1964,12 @@ static void LogTuning(const char* what, const TuneSettings& t) {
         (void)t;
         return;
     } else {
-        char parts[2800];
+        char parts[3600];
         size_t len = 0;
-        for (int p = 0; p < kNumParts && len + 330 < sizeof(parts); ++p) {
+        for (int p = 0; p < kNumParts && len + 430 < sizeof(parts); ++p) {
             const PartTune& pt = t.part[p];
             const int l = LevelOf(t, p);
-            char sag[160] = "";
+            char sag[260] = "";
             if (pt.sag >= 0.0f) snprintf(sag, sizeof(sag), ", sag %.3f g", pt.sag);
             if (pt.match) strcat_s(sag, ", the level's full strength");
             if (pt.limit > 0.0f) {
@@ -1958,6 +1979,15 @@ static void LogTuning(const char* what, const TuneSettings& t) {
             if (pt.gravLevel > 0.0f) {
                 const size_t sl = strlen(sag);
                 snprintf(sag + sl, sizeof(sag) - sl, ", gravity level x%.2f for every body", pt.gravLevel);
+            }
+            if (pt.gravPose[0] > 0.0f || pt.gravPose[1] > 0.0f || pt.gravPose[2] > 0.0f || pt.gravPose[3] > 0.0f) {
+                static const char* const shape[4] = {"back", "side", "bent forward", "face down"};
+                strcat_s(sag, ", gravity level per shape");
+                for (int k = 0; k < 4; ++k) {
+                    const size_t sl = strlen(sag);
+                    if (pt.gravPose[k] > 0.0f) snprintf(sag + sl, sizeof(sag) - sl, " %s x%.2f", shape[k], pt.gravPose[k]);
+                    else snprintf(sag + sl, sizeof(sag) - sl, " %s as the level", shape[k]);
+                }
             }
             len += snprintf(parts + len, sizeof(parts) - len, " %s %s (swing x%.2f, side x%.2f, fore/aft x%.2f, up x%.2f, settle "
                             "x%.2f, bounce x%.2f%s);", kPartName[p], l == kLevelPreset ? "as installed" : l == kLevelOff ? "off"
@@ -2175,6 +2205,21 @@ static void SetDampingOf(void* inst, const SpringEff& e, const SpringInfo& info,
     std::memcpy(&At<float>(inst, 0xC0), c, 12);
 }
 
+// the chosen breast gravity level: a tuning file's [Breasts] fGravityLevel, else TFPhysics.ini [Gravity]
+// fLevel; 0 when neither is set (the installed level, the gravity record's, applies)
+static float GravityChosen() {
+    const float tuned = Tune().part[kPartBreast].gravLevel;
+    return tuned > 0.0f ? tuned : (g_cfg.gravityLevel > 0.0f ? g_cfg.gravityLevel : 0.0f);
+}
+// ... and the highest level a shape is given: the chosen or the installed level, or a shape's own ([Breasts]
+// fGravityBack, fGravitySide, fGravityHang, fGravityDown)
+static float GravityTop(const ActorView& v) {
+    const float chosen = GravityChosen();
+    float top = chosen > 0.0f ? chosen : v.level;
+    for (const float p : Tune().part[kPartBreast].gravPose) top = p > top ? p : top;
+    return top;
+}
+
 // the breast springs' gravity factor.  From Plus gravity up the shapes sit at (or near) their ceilings, and the
 // springs' sag adds on top of them: on all fours a heavy body at x1.5 reached 72% where the base body at Max reaches 70%.
 // So from x2 up the factor is held to 1 / strain (at most x1.3; the base body x1); at x1 it is free (every body
@@ -2184,8 +2229,7 @@ static float BreastSag(const ActorView& v) {
     float cap = 1.0f / v.strain;
     cap = cap > 1.3f ? 1.3f : (cap < 0.15f ? 0.15f : cap);
     const float free = g_cfg.shapeMax > cap ? g_cfg.shapeMax : cap;
-    const float over = Tune().part[kPartBreast].gravLevel;   // a tuned level counts as installed
-    const float lvl = over > 0.0f ? over : v.level;
+    const float lvl = GravityTop(v);   // a chosen level counts as installed, and so does a shape's own
     const float t = lvl <= 1.0f ? 0.0f : (lvl >= 2.0f ? 1.0f : lvl - 1.0f);
     const float most = free + t * (cap - free);
     return v.size < most ? v.size : most;
@@ -2201,8 +2245,9 @@ static void PreUpdate(ActorView& v) {
     // (x each part's gravity factor; the breasts' is in v.size.  per part, the part's fSag where its
     // file gives one; the planet's gravity is in the factors)
     float sagG[kNumParts] = {g_cfg.springGravity, g_cfg.springGravityButt, g_cfg.springGravityBelly, g_cfg.springGravityThighs,
-                             0.0f, 0.0f, 0.0f, 0.0f};
-    static_assert(kPartBreast == 0 && kPartButt == 1 && kPartBelly == 2 && kPartThigh == 3, "sagG lists the parts in order");
+                             g_cfg.springGravityHips, g_cfg.springGravityCalves, g_cfg.springGravityArms, g_cfg.springGravityTorso};
+    static_assert(kPartBreast == 0 && kPartButt == 1 && kPartBelly == 2 && kPartThigh == 3 && kPartHip == 4 &&
+                  kPartCalf == 5 && kPartArm == 6 && kPartTorso == 7, "sagG lists the parts in order");
     float pull[kNumParts];
     for (int p = 0; p < kNumParts; ++p) {
         if (T.part[p].sag >= 0.0f) sagG[p] = T.part[p].sag;
@@ -2444,17 +2489,25 @@ static void PostUpdate(ActorView& v, int site) {
         // how flat the hips (COM) lie: its up axis against the world's up
         const float hipTilt = std::acos(std::fmax(-1.f, std::fmin(1.f, Row(a.com, 0x80, 2).z))) * 57.2957795f;
         const float lying = Clamp01((hipTilt - g_cfg.lyingStartDeg) / (g_cfg.lyingFullDeg - g_cfg.lyingStartDeg)) * thighFlat;
-        // the installed level x the breast size, held per shape to the largest level that shape stays within the
-        // approved back slump's stretch at x2 (62%) on the base body (tests\size_stretch.py; [Gravity]
-        // fMaxBack .. fMaxDown); a tuning file's [Breasts] fGravityLevel gives every body that level instead
-        const float over = Tune().part[kPartBreast].gravLevel;
-        const float lv0 = over > 0.0f ? over : level * v.size;
-        auto capped = [&](float most) {   // (x the body's ceiling scale, 1 on the base body)
+        // the installed level x the breast size, held per shape to its largest level ([Gravity] fMaxBack ..
+        // fMaxDown; the old ones kept the approved back slump's stretch at x2, 62%, on the base body:
+        // tests\size_stretch.py).  a chosen level ([Gravity] fLevel, a tuning file's [Breasts] fGravityLevel,
+        // or per shape its fGravityBack, fGravitySide, fGravityHang, fGravityDown) is what a normal or bigger breast
+        // gets, and its own largest level: smaller or thinner breasts get less (x the size or the ceiling scale, the
+        // lower, when it is below 1)
+        const float chosen = GravityChosen();
+        const float base = chosen > 0.0f ? chosen : level;
+        const float* pose = Tune().part[kPartBreast].gravPose;
+        const float share = v.size < v.ceilScale ? v.size : v.ceilScale;   // (the ceiling scale is at most 1)
+        auto at = [&](int shape, float most) {   // (x the body's ceiling scale, 1 on the base body)
+            const float own = pose[shape] > 0.0f ? pose[shape] : chosen;
+            if (own > 0.0f) return own * share;
+            const float lv = level * v.size;
             const float m = (most < g_cfg.maxLevel ? most : g_cfg.maxLevel) * v.ceilScale;
-            return lv0 > m ? m : lv0;
+            return lv > m ? m : lv;
         };
-        const float lvBack = capped(g_cfg.maxBack), lvSide = capped(g_cfg.maxSide), lvHang = capped(g_cfg.maxHang),
-                    lvDown = capped(g_cfg.maxDown);
+        const float lvBack = at(0, g_cfg.maxBack), lvSide = at(1, g_cfg.maxSide), lvHang = at(2, g_cfg.maxHang),
+                    lvDown = at(3, g_cfg.maxDown);
         // per-bone shapes need the four breast bones; without them only the whole breast moves
         const bool haveBones = a.bones[0] && a.bones[1] && a.bones[2] && a.bones[3];
         const float s = haveBones ? g_cfg.slump : 0.0f;              // on the back
@@ -2500,7 +2553,7 @@ static void PostUpdate(ActorView& v, int site) {
             std::uint64_t next = g_nextSampleMs.load(std::memory_order_relaxed);
             if (now >= next && g_nextSampleMs.compare_exchange_strong(next, now + 1000)) {
                 std::lock_guard<std::mutex> lock(g_sampleMutex);
-                g_sample = {site, {gc.x, gc.y, gc.z}, hipTilt, {wBack, wFwd, wLeft, wRight}, lying, level, {off.x, off.y, off.z},
+                g_sample = {site, {gc.x, gc.y, gc.z}, hipTilt, {wBack, wFwd, wLeft, wRight}, lying, base, {off.x, off.y, off.z},
                             v.size, thighTilt, v.jiggle[kPartBreast]};
                 g_haveSample = true;
             }
@@ -4565,12 +4618,18 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
         "slump %.2f, fixed frame rate %d, spring gravity %.3f g",
         g_iniPath, g_cfg.enabled, g_cfg.hangCm, g_cfg.pressCm, g_cfg.deadZoneDeg, g_cfg.lyingStartDeg, g_cfg.lyingFullDeg,
         g_cfg.slump, g_cfg.fixedFrameRate, g_cfg.springGravity);
-    Log("shapes: side %.2f, face down %.2f, bent forward %.2f; their largest levels: back x%.2f, side x%.2f, bent forward "
-        "x%.2f, face down x%.2f; spring gravity breast %.3f, belly %.3f, butt %.3f, thighs %.3f g; "
-        "size scaling %d (large %.2f, small %.2f, override %.2f, level x size at most %.2f); snapshots %d",
-        g_cfg.sideSlump, g_cfg.faceDownSquash, g_cfg.hangShape, g_cfg.maxBack, g_cfg.maxSide, g_cfg.maxHang, g_cfg.maxDown,
-        g_cfg.springGravity, g_cfg.springGravityBelly, g_cfg.springGravityButt, g_cfg.springGravityThighs, g_cfg.sizeScaling,
-        g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
+    char gravityLevel[96] = "as installed";
+    if (g_cfg.gravityLevel > 0.0f)
+        snprintf(gravityLevel, sizeof(gravityLevel), "x%.2f for every body (its own largest level; smaller or thinner "
+                 "breasts less)", g_cfg.gravityLevel);
+    Log("shapes: side %.2f, face down %.2f, bent forward %.2f; breast gravity level %s; their largest levels: back x%.2f, "
+        "side x%.2f, bent forward x%.2f, face down x%.2f; spring gravity breast %.3f, belly %.3f, butt %.3f, thighs %.3f, "
+        "hips %.3f, calves %.3f, arms %.3f, torso %.3f g; size scaling %d (large %.2f, small %.2f, override %.2f, level x "
+        "size at most %.2f); snapshots %d",
+        g_cfg.sideSlump, g_cfg.faceDownSquash, g_cfg.hangShape, gravityLevel, g_cfg.maxBack, g_cfg.maxSide, g_cfg.maxHang,
+        g_cfg.maxDown, g_cfg.springGravity, g_cfg.springGravityBelly, g_cfg.springGravityButt, g_cfg.springGravityThighs,
+        g_cfg.springGravityHips, g_cfg.springGravityCalves, g_cfg.springGravityArms, g_cfg.springGravityTorso,
+        g_cfg.sizeScaling, g_cfg.sizeLarge, g_cfg.sizeSmall, g_cfg.sizeOverride, g_cfg.maxLevel, g_cfg.snapshots);
     Log("collisions %d (measure only %d): soft size x%.2f, largest push breast %.1f cm, belly %.1f cm, inner thigh %.1f cm, "
         "glute %.1f cm; inner thighs %d, glutes %d; other bodies %d (measure only %d)",
         g_cfg.collision, g_cfg.measureOnly, g_cfg.softScale, g_cfg.maxPush[0] * 100, g_cfg.maxPush[1] * 100, g_cfg.maxPush[2] * 100,

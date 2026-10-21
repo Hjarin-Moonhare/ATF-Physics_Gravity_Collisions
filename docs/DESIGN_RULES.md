@@ -160,3 +160,9 @@ the code does instead.
   than its number and settle later than its preset.
 - Fix: a level is its preset's springs as they are, with the swing on top. Only the body's factors, `fSwing` and
   `fSettle` move the damping.
+
+**26. A gravity level that is set is used as set.**
+- Breaks: held to the installed level's largest levels, a level set for every body or for one shape never shows above
+  them. Multiplied by the breast size, it shows on bigger breasts as a higher level than the one set.
+- Fix: a set level is its own largest level. Only a body it would stretch more than a normal one gets less: x its
+  breast size or its stretch guard's scale, the lower of the two, when that is below 1.

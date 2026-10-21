@@ -60,12 +60,13 @@ swing makes the level's strength: how far the breasts and butt move against Real
 | `sLevel` | a level | the part's level; `Preset` = `[All]`'s |
 | `bMatchLevel` | 0 or 1 | 1 = the level's full strength for this part |
 | `fTravelLimit` | 0.5 to 3 | the farthest the part travels, x its Max physics + Max extra jiggle travel; left out: `kPartTravelLimit` |
-| `fGravityLevel` | 0 to 8 | `[Breasts]` only: every body's breast gravity level, in place of the installed level x the breast size; 0 = as installed |
+| `fGravityLevel` | 0 to 8 | `[Breasts]` only: every body's breast gravity level in every shape, over `[Gravity] fLevel` and the installed level; 0 = not set ([Breast gravity levels](#breast-gravity-levels)) |
+| `fGravityBack`, `fGravitySide`, `fGravityHang`, `fGravityDown` | 0 to 8 | `[Breasts]` only: the level of one shape (lying on the back, on a side, bent forward and on all fours, face down), over every other level; 0 = not set |
 | `fSwing` | 0 to 3 | x the part's swing |
 | `fUpDown`, `fSideToSide`, `fFrontBack` | 0 to 3 | x the swing on one COM axis: vertical, side, fore/aft |
 | `fSettle` | 0.25 to 4 | x the damping ratio: above 1 it settles sooner, below 1 it wobbles longer |
 | `fBounceSpeed` | 0.5 to 2 | x the springs' frequency (the strength x its square) |
-| `fSag` | 0 to 0.3 | the gravity inside the part's springs, in g. Left out: `[Springs]` in TFPhysics.ini (breasts, belly, butt, thighs), else none |
+| `fSag` | 0 to 0.3 | the gravity inside the part's springs, in g. Left out: the part's key in TFPhysics.ini's `[Springs]` ([Spring gravity](#spring-gravity-tfphysicsini)) |
 | a bone's name | 0 to 3 | x that bone's swing; only the part's own bones count |
 
 The bones of each part:
@@ -141,16 +142,48 @@ game starts.
 - **Failed checks.** A read whose check fails is off, and the log's tuning line says which passed.
 - **The planet's gravity** is the player's, kept for every body (the bodies loaded are near the player).
 
-## Gravity's largest levels (TFPhysics.ini)
+## Breast gravity levels
+
+Each gravity shape takes the first level that is set:
+
+1. its own: `[Breasts] fGravityBack`, `fGravitySide`, `fGravityHang` or `fGravityDown` in a tuning file;
+2. `[Breasts] fGravityLevel` in a tuning file;
+3. `[Gravity] fLevel` in TFPhysics.ini;
+4. the installed level (the gravity record's).
+
+A level from 1 to 3 is what a normal or bigger breast gets, and its own largest level. A smaller or thinner breast gets
+it x its breast size or its stretch guard's scale, the lower of the two. The installed level is x the breast size and
+held per shape to its largest level:
 
 | Key | Default | What it does |
 |---|---|---|
-| `[Gravity] fMaxBack` | 2.0 | the largest effective level (installed level x breast size, or `fGravityLevel`) of the shape lying on the back |
+| `[Gravity] fLevel` | 0 | every body's breast gravity level (0.5 to 8); 0 = the installed level |
+| `[Gravity] fMaxBack` | 2.0 | the installed level's largest effective level (x breast size) lying on the back |
 | `[Gravity] fMaxSide` | 2.4 | ... lying on a side |
 | `[Gravity] fMaxHang` | 2.3 | ... bent forward, and on all fours |
 | `[Gravity] fMaxDown` | 3.0 | ... lying face down |
-| `[Size] fMaxLevel` | 3.0 | the effective level never goes above this (0.5 to 8) |
+| `[Size] fMaxLevel` | 3.0 | the installed level x breast size never goes above this |
 
-Each is 0.5 to 8, and the stretch guard scales them down for a body whose breast skin stretches more than the base
-body's. On A-Body's mesh the skin first folds above x3.5 lying on the back or on a side, above x5.75 bent forward or
-on all fours (with the springs' own sag at its most on top), and above x6 face down.
+The largest levels are 0.5 to 8 each, and the stretch guard scales them down for a body whose breast skin stretches
+more than the base body's. On A-Body's mesh the skin first folds above x3.5 lying on the back or on a side, above x5.75
+bent forward or on all fours (with the springs' own sag at its most on top), and above x6 face down.
+
+From level x2 up the breast springs' sag is held to 1 / strain, counting the highest level any shape has.
+
+## Spring gravity (TFPhysics.ini)
+
+| Key | Default | Part |
+|---|---|---|
+| `[Springs] fSpringGravity` | 0.06 | breasts |
+| `[Springs] fSpringGravityButt` | 0.04 | butt |
+| `[Springs] fSpringGravityBelly` | 0.03 | belly |
+| `[Springs] fSpringGravityThighs` | 0 | thighs |
+| `[Springs] fSpringGravityHips` | 0 | hips |
+| `[Springs] fSpringGravityCalves` | 0 | calves |
+| `[Springs] fSpringGravityArms` | 0 | upper arms |
+| `[Springs] fSpringGravityTorso` | 0 | torso |
+
+Each is in g, 0 to 0.3, and a part's `fSag` in a tuning file replaces it while the game runs. A spring's steady sag
+stops at 85% of its 60 fps travel on each COM axis, so more gravity past that adds nothing on that axis. On A-Body's Max
+springs a full tilt reaches that point at about: breasts 0.08, butt 0.079, belly 0.041, thighs 0.044, hips 0.028,
+calves 0.032, arms 0.028, torso 0.013 (the lowest over the extra jiggle levels).

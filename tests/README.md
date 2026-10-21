@@ -74,8 +74,11 @@ the rest pose).
 - **Every gravity shape** on both sides, against the design's offsets: standing, lying on the back, on the left and
   right sides, face down, bent forward on the feet, and on all fours against lying with the thighs flat.
 - **The shape ceilings** at x2 with breast size ×1.5: back ×2.0, side ×2.4, bent forward ×2.3, face down ×3.0. Small
-  breasts stay at ×1.0. With the largest levels set to ×6, the slump reaches ×3; a tuned breast gravity level of ×5
-  gives every body ×5 whatever its size, and each shape still stops at its largest level.
+  breasts stay at ×1.0. With the largest levels set to ×6, the slump reaches ×3.
+- **Set levels:** `[Gravity] fLevel`, a tuned `fGravityLevel` over it and a level per shape over both, each its own
+  largest level: ×5 stays ×5 on a ×1.5 breast and over largest levels of ×2.0, a ×0.5 breast gets half, a stretch-guard
+  scale of 0.8 gives 0.8 times (the lower of size and scale counts); a shape without its own level keeps the next one,
+  down to the installed level.
 - **Shapes off:** with the side shape off, only the slide; with the teardrop off, the hang at 1.2.
 - **Spring gravity** per part.
 - **The breast size** from the sliders on a fake character record, and ×1 without a character.
@@ -96,8 +99,9 @@ Body-shape physics, against numbers worked out from the design, not from the plu
   character.
 - **Per spring:** its part, its ceilings (Max physics + Max jiggle over the installed preset), its damping floor.
 - **Damping** per body and per instance: two actors on one record keep their own.
-- **Spring gravity and jiggle** per part, and the swing scaled per COM axis: one ceiling per part, a spring that skips
-  a frame, two instances on one bone, a neutral body left alone.
+- **Spring gravity and jiggle** per part (the hips' and the torso's gravity from a tuning file and from `[Springs]`),
+  and the swing scaled per COM axis: one ceiling per part, a spring that skips a frame, two instances on one bone, a
+  neutral body left alone.
 - **The stretch guard:** the strain per body, the shape ceilings scaled by it, and the breast springs' gravity held.
 - **Settings:** the shipped INI's `[BodyShape]` keys, and garbage `[BodyShape]` values (NaN taken as the low end).
 - **Tuning each part,** written out from the design ([../docs/TUNING.md](../docs/TUNING.md)):
@@ -119,13 +123,16 @@ own reader, one line per setting. Part of what it prints:
 
 ```
 build\tests\tune_dump.exe "C:\Games\Starfield\Data\SFSE\Plugins\TFPhysics.ini"
+gravity enabled 1 level 5.0000 back 2.0000 side 2.4000 hang 2.3000 down 3.0000 maxlevel 3.0000 size 1
+springs Breasts 0.0600 Butt 0.0800 Belly 0.0400 Thighs 0.0450 Hips 0.0300 Calves 0.0320 Arms 0.0300 Torso 0.0130
 files 2 All.ini, Breasts.ini
 all Medium
-part Breasts level Off swing 1.0000 side 1.0000 frontback 1.0000 updown 1.0000 settle 1.0000 bounce 1.0000 sag -1.0000
+part Breasts level Off match 0 swing 1.0000 ... sag -1.0000 limit -1.0000 gravity -1.0000 back 4.0000 ...
 outfit [Spacesuit] form 00000000 slots 35 | Breasts 0.5000 Butt 0.6000 ...
 ```
 
-`sag -1` means the part's sag comes from TFPhysics.ini's `[Springs]`. A key that doesn't show its value was not read:
+`sag -1` means the part's sag comes from TFPhysics.ini's `[Springs]`; `gravity -1` and a shape's `-1` mean no level is
+set there. A key that doesn't show its value was not read:
 a typo in its name, or a comment after its value.
 
 ## addrlib_test.cpp

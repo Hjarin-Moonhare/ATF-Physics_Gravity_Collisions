@@ -9,8 +9,16 @@ Releases are the builds A-Body ships.
   A level's swing no longer moves the damping.
 - **`bMatchLevel`:** a part at the level's full strength (`kLevelMatch`), where the presets give it a smaller share.
 - **`fTravelLimit`:** each part's farthest travel, x its Max physics + Max extra jiggle travel (`kPartTravelLimit`).
-- **Gravity:** the shapes' largest levels are `[Gravity] fMaxBack`, `fMaxSide`, `fMaxHang` and `fMaxDown`; `[Size]
-  fMaxLevel` goes up to 8; a tuning file's `[Breasts] fGravityLevel` sets every body's breast gravity level.
+- **Breast gravity levels:**
+  - `[Gravity] fLevel` sets every body's breast gravity level in place of the installed one. A tuning file's
+    `[Breasts] fGravityLevel` replaces it while the game runs, and `fGravityBack`, `fGravitySide`, `fGravityHang` and
+    `fGravityDown` set one shape each;
+  - a level set this way is what a normal or bigger breast gets, and its own largest level. A smaller or thinner
+    breast gets it x its breast size or its stretch guard's scale, the lower of the two;
+  - the installed level's largest levels are `[Gravity] fMaxBack`, `fMaxSide`, `fMaxHang` and `fMaxDown`, and
+    `[Size] fMaxLevel` goes up to 8.
+- **Spring gravity in all 8 parts:** `[Springs] fSpringGravityHips`, `fSpringGravityCalves`, `fSpringGravityArms` and
+  `fSpringGravityTorso` join the breasts, butt, belly and thighs (0 unless set).
 - **Tuning files** (`Data\SFSE\Plugins\TFPhysics\*.ini`, every build; [docs/TUNING.md](docs/TUNING.md)):
   - each of the 8 parts takes any physics preset's springs at the installed extra jiggle, Lower or Minimal
     (Realistic's with half and a quarter of the swing), or Off;
