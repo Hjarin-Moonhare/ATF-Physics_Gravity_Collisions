@@ -22,6 +22,10 @@
 //                             bodies push too, the arms and hands below a breast lift it; then, on a body with a dent
 //                             rig (DentRig.bin), the arms, hands and legs still pressing into its skin dent it,
 //                             the dent bones turning with the dent's slope (dents_core.h)
+// Each whole breast and each glute is one damped mass on its anchor (breast_mass.h), and every body spring is damped
+// against the body's motion, not the world's.  On the player's body the hands and arms press the breasts' flesh
+// (FreeMorph, freemorph_core.h): a contact solved on a worker thread and written into one free performance morph of the
+// body through the engine's own buffer update.
 // Writes go where the game's own setter writes: the node's local translation and the skeleton rig's copy of it.
 // The installed gravity level (x1, x2, x3) is read from the corrective records themselves; breast gravity also follows
 // the breast size sliders (sfee's morph-target weights on the character's record).
@@ -76,6 +80,8 @@ constexpr bool kCollisions = kDiag;
 #include "body_shape_data.h"
 #include "preset_data.h"
 #include "dents_core.h"
+#include "breast_mass.h"
+#include "freemorph_core.h"
 #include <unordered_map>
 #include <vector>
 
@@ -348,6 +354,13 @@ struct Settings {
     float faceDownSquash = 1.0f;  // lying face down: 0 = press only, 1 = squash and spread, up to 1.5
     float hangShape = 1.0f;       // bent forward on the feet: 0 = the whole breast hangs, 1 = teardrop, up to 1.5
     bool fixedFrameRate = true;   // keep every A-Body spring's travel limit at its 60 fps size at any frame rate
+    // breast_mass.h: [BreastMass] bEnabled, fScale: each whole breast one damped mass on its anchor; [Springs]
+    // bRelativeDamping: the springs damped against the body's motion, not the world's (no lag when moving)
+    bool massOn = true;
+    float massScale = 1.0f;
+    bool relDamping = true;
+    bool gluteOn = true;          // [GluteMass] bEnabled, fScale: each glute one damped mass on L/R_Butt
+    float gluteScale = 1.0f;
     float springGravity = 0.06f;  // gravity in the breast springs, as a fraction of 1 g (0 = off)
     float springGravityBelly = 0.03f, springGravityButt = 0.04f, springGravityThighs = 0.0f;   // the same, other parts
     float springGravityHips = 0.0f, springGravityCalves = 0.0f, springGravityArms = 0.0f, springGravityTorso = 0.0f;
@@ -387,6 +400,20 @@ struct Settings {
     bool dentTilt = true;         // [Dents] bTilt: a dent bone also turns with the dent's slope (a rig whose regions tilt)
     float dentScale = 1.0f;       // ... [Dents] fScale: the dents' depth x this (0 to 3)
     float dentRelax = 0.06f;      // ... [Dents] fRelaxTime: a dent follows its contact within about this (s; 0 = at once)
+    // [FreeMorph]: the body's free morph (TFFREE in its performance morph.dat; FreeMorph.bin in the TFPhysics folder),
+    // its records rewritten every frame for the player: a flesh contact on the breasts
+    bool fmEnabled = true;        // [FreeMorph] bEnabled
+    int fmModeKey = 0;            // ... iModeKey: a key that switches the mode (0 = none; 111 = Numpad /, sent with
+                                  //     NumLock on or off): contact -> moving dent -> still dent -> off -> contact ...
+    int fmStartMode = 2;          // ... iStartMode: 0 still dent (the file's own records), 1 moving, 2 contact, 3 off
+    float fmGrip = -1.0f;         // ... fGrip (mm): a held point drags the skin at most this far at a firm press, then
+                                  //     slides along (< 0: the data's, 10; 0: no grip)
+    float fmHoldGive = -1.0f;     // ... fHoldGive (mm/N): a held point's sideways give, the grip's spring (< 0: the
+                                  //     data's, 10; below 7 the solve can blow up)
+    float fmCapScale = 1.0f;      // ... fCapScale: the press's soft cap (a third to a half of the tissue's depth) x this
+    float fmDentSpeed = 0.5f;     // ... fDentSpeed: the moving dent's turns per second
+    bool fmOwnPushes = false;     // ... bOwnPushes: in contact mode the arms' capsule pushes, the lift and the dents on
+                                  //     the breasts too (off: the free morph alone answers the hands and arms there)
     float deadMaxAge = 0.75f;     // ... a dead body lying still is used from a share up to this old (s)
     float maxPushOther = 0.03f;   // ... other bodies push a soft bone at most this far (m), inside its group's cap
     float softScale = 1.1f;       // size of the soft spheres, x the measured size
@@ -475,6 +502,18 @@ static void ReadSettings() {   // from g_iniPath
     g_cfg.steerTime = steerTime <= 3 ? static_cast<int>(steerTime) : 1;
     g_cfg.tuneReload = GetPrivateProfileIntA("Tuning", "bReload", 1, g_iniPath) != 0;
     g_cfg.settlePaused = GetPrivateProfileIntA("Springs", "bSettleWhenPaused", 1, g_iniPath) != 0;
+    {   // [BreastMass], [Springs] bRelativeDamping
+        g_cfg.massOn = GetPrivateProfileIntA("BreastMass", "bEnabled", 1, g_iniPath) != 0;
+        char b[64];
+        GetPrivateProfileStringA("BreastMass", "fScale", "", b, sizeof(b), g_iniPath);
+        const float f = b[0] ? static_cast<float>(atof(b)) : 1.0f;
+        g_cfg.massScale = !(f >= 0.0f) ? 0.0f : (f > 2.0f ? 2.0f : f);
+        g_cfg.relDamping = GetPrivateProfileIntA("Springs", "bRelativeDamping", 1, g_iniPath) != 0;
+        g_cfg.gluteOn = GetPrivateProfileIntA("GluteMass", "bEnabled", 1, g_iniPath) != 0;
+        GetPrivateProfileStringA("GluteMass", "fScale", "", b, sizeof(b), g_iniPath);
+        const float gs = b[0] ? static_cast<float>(atof(b)) : 1.0f;
+        g_cfg.gluteScale = !(gs >= 0.0f) ? 0.0f : (gs > 2.0f ? 2.0f : gs);
+    }
     g_cfg.collision = GetPrivateProfileIntA("Collision", "bEnabled", 1, g_iniPath) != 0;
     auto readC = [](const char* key, float def) {
         char b[64];
@@ -500,6 +539,24 @@ static void ReadSettings() {   // from g_iniPath
         GetPrivateProfileStringA("Dents", "fRelaxTime", "", b, sizeof(b), g_iniPath);
         const float t = b[0] ? static_cast<float>(atof(b)) : 0.06f;
         g_cfg.dentRelax = !(t >= 0.0f) ? 0.0f : (t > 1.0f ? 1.0f : t);
+    }
+    {   // [FreeMorph]
+        char b[64];
+        auto rf = [&](const char* key, float def, float lo, float hi) {
+            GetPrivateProfileStringA("FreeMorph", key, "", b, sizeof(b), g_iniPath);
+            const float v = b[0] ? static_cast<float>(atof(b)) : def;
+            return !(v >= lo) ? lo : (v > hi ? hi : v);
+        };
+        g_cfg.fmEnabled = GetPrivateProfileIntA("FreeMorph", "bEnabled", 1, g_iniPath) != 0;
+        g_cfg.fmModeKey = static_cast<int>(GetPrivateProfileIntA("FreeMorph", "iModeKey", 0, g_iniPath));
+        const int sm = static_cast<int>(GetPrivateProfileIntA("FreeMorph", "iStartMode", 2, g_iniPath));
+        g_cfg.fmStartMode = sm < 0 || sm > 3 ? 2 : sm;
+        g_cfg.fmGrip = rf("fGrip", -1.0f, -1.0f, 30.0f);
+        g_cfg.fmHoldGive = rf("fHoldGive", -1.0f, -1.0f, 100.0f);
+        if (g_cfg.fmHoldGive >= 0.0f && g_cfg.fmHoldGive < 7.0f) g_cfg.fmHoldGive = 7.0f;
+        g_cfg.fmCapScale = rf("fCapScale", 1.0f, 0.3f, 1.5f);
+        g_cfg.fmDentSpeed = rf("fDentSpeed", 0.5f, 0.0f, 4.0f);
+        g_cfg.fmOwnPushes = GetPrivateProfileIntA("FreeMorph", "bOwnPushes", 0, g_iniPath) != 0;
     }
     g_cfg.softScale = readC("fSoftScale", g_cfg.softScale);
     g_cfg.softScale = clampf(g_cfg.softScale, 0.5f, 1.5f);
@@ -851,6 +908,10 @@ static std::atomic<std::uint64_t> g_nextLogMs{0};
 static std::atomic<std::uint64_t> g_calls[3];
 static std::atomic<std::uint64_t> g_gravityActors{0};
 static std::atomic<std::uint64_t> g_springsScaled{0};
+static std::atomic<std::uint64_t> g_massSteps{0}, g_relKicks{0};   // breast mass steps, spring kicks
+static std::atomic<std::uint32_t> g_massMaxUm[3], g_relLagUm{0};
+static std::atomic<std::uint64_t> g_gluteSteps{0};                 // glute mass steps
+static std::atomic<std::uint32_t> g_gluteMaxUm[3];                 // ... the largest offset up, forward, sideways   // ... the largest offset per chest axis, lag taken off
 static std::atomic<std::uint32_t> g_lastScaleBits{0}, g_lastDtBits{0};
 static std::atomic<std::uint64_t> g_nextSampleMs{0};
 static std::atomic<std::uint64_t> g_pushes{0};      // soft bones pushed by a collision
@@ -867,6 +928,31 @@ static std::atomic<std::uint32_t> g_dentMaxMm{0}, g_dentBoneMm{0};              
 // the dent rig (DentRig.bin in the TFPhysics folder, written with the body by A-Body's abody_dent_rig.py)
 static dents::Rig g_dent;
 static bool g_dentOk = false;
+// FreeMorph
+static fm::Data g_fm;
+static bool g_fmOk = false;            // the data read and the MorphDriver instance's class found
+static bool g_fmWritesOk = false;      // ... and the engine's buffer update and morph table as read (writes allowed)
+static std::uintptr_t g_fmMdVt = 0, g_fmGeomVt = 0, g_fmUpdateBuffer = 0, g_fmTable = 0;
+static std::vector<int> g_fmSliderSlot;              // per data slider: a kSliderKey index, 100 + 0/1/2 Thin/Strong/Overweight
+static std::unordered_map<std::string, int> g_fmBoneNames;   // lower-case bone name -> data bone
+static std::mutex g_fmMapMutex;
+static std::unordered_map<void*, bool> g_fmOurs;     // a MorphDriver record's data -> it drives the free morph
+enum FmMode { kFmStill, kFmMoving, kFmContact, kFmOff, kFmModes };
+static const char* const kFmModeName[kFmModes] = {"still dent (the file's own records)", "moving dent (written every frame)",
+                                                  "contact (the hands and arms press the breasts)", "off (weight 0)"};
+static std::atomic<int> g_fmMode{0};
+static std::atomic<std::uint64_t> g_fmWeightWrites{0}, g_fmUploads{0}, g_fmUploadBytes{0}, g_fmUploadTicks{0},
+    g_fmSolveTicks{0}, g_fmSolves{0}, g_fmNear{0}, g_fmRefused{0}, g_fmBufferChanges{0}, g_fmNoDriver{0}, g_fmTicketLo{0},
+    g_fmTicketHi{0};
+static std::atomic<std::uint32_t> g_fmSolveMaxUs{0};
+static std::atomic<std::uint64_t> g_fmSkipped{0}, g_fmSubmitTicks{0};   // the worker busy; the update thread's share
+struct FmRegionLog {
+    std::uint32_t cand = 0, contacts = 0, held = 0, slipping = 0, capped = 0, sweeps = 0;
+    float press = 0, rise = 0, inLimb = 0;
+};
+static FmRegionLog g_fmLast[8];        // the player's last contact frame per breast (g_fmLogMutex)
+static std::mutex g_fmLogMutex;
+static char g_fmRefusedWhy[200] = "";  // (g_fmLogMutex)
 static std::vector<int> g_dentSoft;       // per rig bone: its soft bone (kSoft index; this plugin moves it), else -1
 static std::vector<int> g_dentFollow;     // per rig bone: the soft bone it hangs on (the nipples on Lower), else -1
 static std::vector<int> g_dentMorphSlot;  // per rig slider: a kSliderKey index, 100 + 0/1/2 for Thin/Strong/Overweight
@@ -1084,6 +1170,15 @@ static void MaybeLog() {
         static_cast<unsigned long long>(g_calls[0].exchange(0)), static_cast<unsigned long long>(g_calls[1].exchange(0)),
         static_cast<unsigned long long>(g_calls[2].exchange(0)), static_cast<unsigned long long>(g_gravityActors.exchange(0)),
         static_cast<unsigned long long>(g_springsScaled.exchange(0)), dt > 0 ? 1.0 / dt : 0.0, scale);
+    Log("   breast mass ([BreastMass] %s, x%.2f): %llu steps, the largest offset along the spine %.1f mm, "
+        "forward %.1f mm, sideways %.1f mm; relative damping (%s): %llu spring updates, the largest steady lag taken off %.1f mm",
+        g_cfg.massOn ? "on" : "off", g_cfg.massScale, static_cast<unsigned long long>(g_massSteps.exchange(0)),
+        g_massMaxUm[0].exchange(0) / 1000.0, g_massMaxUm[1].exchange(0) / 1000.0, g_massMaxUm[2].exchange(0) / 1000.0,
+        g_cfg.relDamping ? "on" : "off", static_cast<unsigned long long>(g_relKicks.exchange(0)), g_relLagUm.exchange(0) / 1000.0);
+    Log("   glute mass ([GluteMass] %s, x%.2f): %llu steps, the largest offset up/down %.1f mm, "
+        "forward %.1f mm, sideways %.1f mm", g_cfg.gluteOn ? "on" : "off", g_cfg.gluteScale,
+        static_cast<unsigned long long>(g_gluteSteps.exchange(0)), g_gluteMaxUm[0].exchange(0) / 1000.0,
+        g_gluteMaxUm[1].exchange(0) / 1000.0, g_gluteMaxUm[2].exchange(0) / 1000.0);
     {
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
@@ -1152,6 +1247,41 @@ static void MaybeLog() {
                 static_cast<unsigned long long>(g_dentTurnWhere.exchange(0)),
                 static_cast<unsigned long long>(g_dentTurnChecked.exchange(0)),
                 static_cast<unsigned long long>(g_dentTurnBack.exchange(0)));
+        }
+        if (g_fmOk) {   // FreeMorph
+            const std::uint64_t ups = g_fmUploads.exchange(0), solves = g_fmSolves.exchange(0);
+            const std::uint64_t lo = g_fmTicketLo.exchange(0), hi = g_fmTicketHi.exchange(0);
+            const std::uint64_t ww = g_fmWeightWrites.exchange(0), upTicks = g_fmUploadTicks.exchange(0),
+                                solveTicks = g_fmSolveTicks.exchange(0), subTicks = g_fmSubmitTicks.exchange(0);
+            const double fq = static_cast<double>(freq.QuadPart);
+            char regs[900] = "", why[200] = "";
+            size_t rl = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_fmLogMutex);
+                for (size_t ri = 0; ri < g_fm.regions.size() && ri < 8; ++ri) {
+                    const FmRegionLog& L = g_fmLast[ri];
+                    rl += snprintf(regs + rl, sizeof(regs) - rl, " %s: %u candidates, %u in contact (%u held, %u sliding, %u "
+                                   "capped), %u sweeps, press %.1f mm, rise %.1f mm, %.1f mm left in a limb;",
+                                   g_fm.regions[ri].name.c_str(), L.cand, L.contacts, L.held, L.slipping, L.capped, L.sweeps,
+                                   L.press * 1000, L.rise * 1000, L.inLimb * 1000);
+                }
+                strcpy_s(why, g_fmRefusedWhy);
+                g_fmRefusedWhy[0] = 0;
+            }
+            Log("   free morph: mode %s; weight written %llu times; records written %llu times (%.1f KB, %.1f us each, "
+                "tickets %llu..%llu); contact solved %llu times on its thread (%.2f ms each, at most %.2f ms), %llu with a limb "
+                "near, %llu frames it was still busy, the update thread's share %.1f us a frame;%s "
+                "buffer changes %llu; writes refused %llu%s%s%s; updates of the player's body without the driver %llu",
+                kFmModeName[g_fmMode.load()], static_cast<unsigned long long>(ww),
+                static_cast<unsigned long long>(ups), static_cast<double>(g_fmUploadBytes.exchange(0)) / 1024.0,
+                ups ? static_cast<double>(upTicks) * 1e6 / fq / static_cast<double>(ups) : 0.0,
+                static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi), static_cast<unsigned long long>(solves),
+                solves ? static_cast<double>(solveTicks) * 1e3 / fq / static_cast<double>(solves) : 0.0,
+                g_fmSolveMaxUs.exchange(0) / 1000.0, static_cast<unsigned long long>(g_fmNear.exchange(0)),
+                static_cast<unsigned long long>(g_fmSkipped.exchange(0)),
+                ww ? static_cast<double>(subTicks) * 1e6 / fq / static_cast<double>(ww) : 0.0, rl ? regs : "",
+                static_cast<unsigned long long>(g_fmBufferChanges.exchange(0)), static_cast<unsigned long long>(g_fmRefused.exchange(0)),
+                why[0] ? " (last: " : "", why, why[0] ? ")" : "", static_cast<unsigned long long>(g_fmNoDriver.exchange(0)));
         }
         if (g_cfg.proxies)
             Log("   world proxies: A-Body updates with the proxy nodes %llu (both proxies in a world %llu, their C_Chest "
@@ -1527,6 +1657,10 @@ struct ActorView {
     float collideSize = 1.0f;       // the breast's size for its collision shapes (BodyFactors)
     float breastMorph[kLiftMorphs] = {};   // ... the sliders its skin samples follow
     float dentMorph[32] = {};       // the dent rig's sliders (BodyFactors)
+    void* butt[2] = {};             // L_Butt / R_Butt (the TF_Glute springs' parent), this update
+    void* fmInst = nullptr;         // FreeMorph: the free morph's MorphDriver instance on this body
+    void* fmGeom = nullptr;         // ... the geometry it drives
+    float fmMorph[32] = {};         // ... the free morph data's sliders (BodyFactors)
     void AddTo(void* node, const float d[3]) {
         for (int i = 0; i < nAdd; ++i)
             if (addNode[i] == node) {
@@ -1692,6 +1826,7 @@ static const SpringInfo* InfoOf(ActorView& v, int i) {
     return v.infos[i];
 }
 
+static bool FmIsOurs(void* data);   // below (FreeMorph)
 static bool Collect(void* owner, ActorView& v) {
     if (!owner) return false;
     v.owner = owner;
@@ -1704,6 +1839,13 @@ static bool Collect(void* owner, ActorView& v) {
         const std::uintptr_t vt = At<std::uintptr_t>(inst, 0);
         if (vt == sbVtbl) {
             if (nAll < 256 && At<void*>(inst, 0x18) && At<void*>(inst, 0x20)) allSprings[nAll++] = inst;
+            continue;
+        }
+        if (g_fmMdVt && vt == g_fmMdVt) {   // FreeMorph: the free morph's MorphDriver (its morph named in the data)
+            if (!v.fmInst && FmIsOurs(At<void*>(inst, 0x20))) {
+                v.fmInst = inst;
+                v.fmGeom = At<void*>(inst, 0x18);
+            }
             continue;
         }
         if (vt != pdVtbl) continue;
@@ -1899,6 +2041,7 @@ struct BodyFactors {
     float collideSize = 1.0f;  // the breast's size for its collision shapes (1 + 0.5 Large - 0.5 Small, 0.5 .. 1.6)
     float breastMorph[kLiftMorphs] = {};   // ... and the weights of the sliders that move breast skin (lift_data.h)
     float dentMorph[32] = {};   // the weights of the dent rig's sliders (its own order)
+    float fmMorph[32] = {};     // FreeMorph: the free morph data's sliders (its own order)
     BodyFactors() {
         for (int p = 0; p < kNumParts; ++p) jiggle[p] = gravity[p] = 1.0f;
     }
@@ -2001,6 +2144,10 @@ static BodyFactors FactorsFrom(const SizeRead& r) {
     for (size_t m = 0; m < g_dentMorphSlot.size() && m < 32; ++m) {   // the dent rig's sliders
         const int k = g_dentMorphSlot[m];
         f.dentMorph[m] = (k >= 100 && k < 103) ? r.tri[k - 100] : ((k >= 0 && k < kNumSliders) ? r.slider[k] : 0.0f);
+    }
+    for (size_t m = 0; m < g_fmSliderSlot.size() && m < 32; ++m) {   // FreeMorph: its data's sliders
+        const int k = g_fmSliderSlot[m];
+        f.fmMorph[m] = (k >= 100 && k < 103) ? Unit(r.tri[k - 100]) : ((k >= 0 && k < kNumSliders) ? r.slider[k] : 0.0f);
     }
     if (g_cfg.stretchGuard) {
         f.strain = StrainOf(r);
@@ -2136,7 +2283,7 @@ static bool TuneReadsBodies() {   // the tuning needs to know who a body is, wha
     return T.nChars > 0 || (T.outfitsOn && T.nOutfits > 0) || (T.planet && g_gravityScaleOk);
 }
 static BodyFactors BodyFactorsOf(void* owner, void* actorHint = nullptr) {
-    const bool collideReads = g_cfg.collision && (g_cfg.breastSize || g_cfg.breastLift);
+    const bool collideReads = (g_cfg.collision && (g_cfg.breastSize || g_cfg.breastLift)) || g_fmOk;   // (FreeMorph reads them too)
     if ((!g_cfg.sizeScaling && !g_cfg.shape && !TuneReadsBodies() && !collideReads) || !g_actorVt || !owner)
         return FactorsFrom(SizeRead{});
     const std::uint64_t now = GetTickCount64();
@@ -2218,6 +2365,7 @@ static void TakeFactors(ActorView& v, const BodyFactors& f) {
     v.collideSize = f.collideSize;
     std::memcpy(v.breastMorph, f.breastMorph, sizeof(v.breastMorph));
     std::memcpy(v.dentMorph, f.dentMorph, sizeof(v.dentMorph));
+    std::memcpy(v.fmMorph, f.fmMorph, sizeof(v.fmMorph));
 }
 
 // a spring as tuned.  Its part's level gives it that preset's springs (the bone's in preset_data.h, at the
@@ -2366,6 +2514,179 @@ static float BreastSag(const ActorView& v) {
     return v.size < most ? v.size : most;
 }
 
+// ---- the breast and glute masses and the springs' relative damping (breast_mass.h)
+struct MassSlot { void* node; bm::State s; std::uint64_t ms; float local[3]; };   // local: the glute bone's rest
+struct RelSlot { void* inst; float g[3]; std::uint64_t ms; int have; int body; int glute; };   // glute: 0 L, 1 R, -1   // body: the bone is the body's own
+constexpr int kMassSlots = 256, kRelSlots = 4096;
+static std::mutex g_massMutex;
+static MassSlot g_massSlots[kMassSlots];
+static RelSlot g_relSlots[kRelSlots];
+template <class T>
+static T* SlotFor(T* tab, int n, void* key, void* T::*field, std::uint64_t now, bool& fresh) {   // g_massMutex held
+    const std::uint64_t h = (reinterpret_cast<std::uintptr_t>(key) >> 4) * 0x9E3779B97F4A7C15ull;
+    T* stale = nullptr;
+    for (int probe = 0; probe < 64; ++probe) {
+        T& e = tab[((h >> 40) + probe) & (n - 1)];
+        if (e.*field == key) {
+            fresh = false;
+            return &e;
+        }
+        if (!(e.*field) || now - e.ms > 5000) {
+            if (!stale) stale = &e;
+            if (!(e.*field)) break;
+        }
+    }
+    if (!stale) return nullptr;
+    *stale = T{};
+    stale->*field = key;
+    fresh = true;
+    return stale;
+}
+static void KeepMaxUm(std::atomic<std::uint32_t>& slot, float m) {
+    const std::uint32_t um = static_cast<std::uint32_t>(std::fabs(m) * 1e6f);
+    std::uint32_t prev = slot.load(std::memory_order_relaxed);
+    while (um > prev && !slot.compare_exchange_weak(prev, um)) {}
+}
+// Before the game's update: each spring's offset velocity (COM's axes) gets the damping on its goal's world velocity
+// back, so the game's damping (on the bone's world motion) acts against the body's motion instead (bm::RelativeKick)
+static void RelativeDamping(ActorView& v, float dt) {
+    if (!v.com) return;
+    const std::uint64_t now = GetTickCount64();
+    const Vec3 ca[3] = {Row(v.com, 0x80, 0), Row(v.com, 0x80, 1), Row(v.com, 0x80, 2)};
+    for (int i = 0; i < v.nSprings; ++i) {
+        void* inst = v.springs[i];
+        void* target = At<void*>(inst, 0x18);
+        if (!target) continue;
+        void* parent = At<void*>(target, 0x38);
+        float m[16];
+        if (!parent || !SafeCopy(m, static_cast<char*>(parent) + 0x80, 64)) continue;
+        const float* rest = &At<float>(inst, 0x60);
+        const float sc = (m[15] > 0.05f && m[15] < 20.0f) ? m[15] : 1.0f;
+        float g[3];
+        for (int k = 0; k < 3; ++k) g[k] = m[12 + k] + sc * (rest[0] * m[k] + rest[1] * m[4 + k] + rest[2] * m[8 + k]);
+        Vec3 vw{};
+        bool use = false;
+        {
+            std::lock_guard<std::mutex> lock(g_massMutex);
+            bool fresh = false;
+            RelSlot* e = SlotFor(g_relSlots, kRelSlots, inst, &RelSlot::inst, now, fresh);
+            if (!e) continue;
+            if (fresh) {   // only the body's own soft bones (TF_..., the nipples): hair and outfit springs trail as before
+                char name[64] = {};
+                const bool named = NodeName(target, name, sizeof(name));
+                const size_t len = named ? std::strlen(name) : 0;
+                e->body = named && (!_strnicmp(name, "TF_", 3) || (len > 7 && !_stricmp(name + len - 7, "_Nipple"))) ? 1 : 0;
+                e->glute = named && !_strnicmp(name, "TF_Glute_", 9) && len > 2 && name[len - 2] == '_'
+                    ? (name[len - 1] == 'L' || name[len - 1] == 'l' ? 0 : (name[len - 1] == 'R' || name[len - 1] == 'r' ? 1 : -1))
+                    : -1;
+            }
+            if (e->glute >= 0) v.butt[e->glute] = parent;   // the glute's anchor
+            if (!e->body || !g_cfg.relDamping) {
+                e->ms = now;
+                continue;
+            }
+            if (!fresh && e->have) {
+                vw = {(g[0] - e->g[0]) / dt, (g[1] - e->g[1]) / dt, (g[2] - e->g[2]) / dt};
+                const float jump = Dot(vw, vw) * dt * dt;   // a cut or a teleport: the goal over 5 m away in one frame
+                use = jump < 5.0f * 5.0f;                   // (not a speed: a long fall goes past any speed limit)
+            }
+            std::memcpy(e->g, g, 12);
+            e->have = 1;
+            e->ms = now;
+        }
+        if (!use) continue;
+        const float vg[3] = {Dot(vw, ca[0]), Dot(vw, ca[1]), Dot(vw, ca[2])};
+        const float* c = &At<float>(inst, 0xC0);
+        float dv[3];
+        bm::RelativeKick(vg, c, dt, dv);
+        float* vel = &At<float>(inst, 0xB0);
+        for (int k = 0; k < 3; ++k) vel[k] += dv[k];
+        if constexpr (kDiag) {
+            g_relKicks.fetch_add(1, std::memory_order_relaxed);
+            const float* strength = &At<float>(At<void*>(inst, 0x20), 0x20);
+            for (int k = 0; k < 3; ++k)
+                if (strength[k] > 0.0f) KeepMaxUm(g_relLagUm, c[k] * vg[k] / strength[k]);
+        }
+    }
+}
+// After the game's update: the whole breast's offset on its anchor, in the chest's axes (bm::Step)
+static bool BreastMass(const ActorView& v, const Anchor& a, void* chest, int side, float out[3]) {
+    const float dt = g_addr[kFrameTime] ? *reinterpret_cast<const float*>(g_addr[kFrameTime]) : 1.0f / 60.0f;   // (the tests: no game)
+    float m[16];
+    if (!SafeCopy(m, static_cast<char*>(chest) + 0x80, 64)) return false;
+    const float sc = (m[15] > 0.05f && m[15] < 20.0f) ? m[15] : 1.0f;
+    float p[3], axes[9];
+    for (int k = 0; k < 3; ++k) p[k] = m[12 + k] + sc * (a.rest[0] * m[k] + a.rest[1] * m[4 + k] + a.rest[2] * m[8 + k]);
+    for (int r = 0; r < 3; ++r)
+        for (int k = 0; k < 3; ++k) axes[3 * r + k] = m[4 * r + k];
+    float cm[16];
+    float upSign = 1.0f;   // the chest's X axis up the body (toward the head) or down: from the hips (COM) to the chest
+    if (v.com && SafeCopy(cm, static_cast<char*>(v.com) + 0x80, 64)) {
+        const float d = (m[12] - cm[12]) * m[0] + (m[13] - cm[13]) * m[1] + (m[14] - cm[14]) * m[2];
+        upSign = d >= 0.0f ? 1.0f : -1.0f;
+    }
+    static const bm::Params P;
+    {
+        std::lock_guard<std::mutex> lock(g_massMutex);
+        bool fresh = false;
+        MassSlot* e = SlotFor(g_massSlots, kMassSlots, a.node, &MassSlot::node, GetTickCount64(), fresh);
+        if (!e) return false;
+        e->ms = GetTickCount64();
+        bm::Step(e->s, p, axes, upSign, side == 0 ? 1 : 0, dt, P, out);
+    }
+    float j = v.jiggle[kPartBreast];
+    j = j < 0.0f ? 0.0f : (j > 2.0f ? 2.0f : j);
+    for (int k = 0; k < 3; ++k) out[k] *= g_cfg.massScale * j;
+    if constexpr (kDiag) {
+        g_massSteps.fetch_add(1, std::memory_order_relaxed);
+        for (int k = 0; k < 3; ++k) KeepMaxUm(g_massMaxUm[k], out[k]);
+    }
+    return true;
+}
+
+// After the game's update: each glute's offset on its anchor (L/R_Butt), in the body's axes (COM: X right, Y forward,
+// Z up), added on top of the bone in its parent's frame
+static void GluteMass(ActorView& v) {
+    if (!v.com) return;
+    const float dt = g_addr[kFrameTime] ? *reinterpret_cast<const float*>(g_addr[kFrameTime]) : 1.0f / 60.0f;   // (the tests: no game)
+    const Vec3 cx = Row(v.com, 0x80, 0), cy = Row(v.com, 0x80, 1), cz = Row(v.com, 0x80, 2);
+    const float axes[9] = {cz.x, cz.y, cz.z, cy.x, cy.y, cy.z, -cx.x, -cx.y, -cx.z};   // up, forward, left
+    static const bm::Params P = bm::GluteParams();
+    float j = v.jiggle[kPartButt];
+    j = j < 0.0f ? 0.0f : (j > 2.0f ? 2.0f : j);
+    for (int side = 0; side < 2; ++side) {
+        void* butt = v.butt[side];
+        if (!butt) continue;
+        void* parent = At<void*>(butt, 0x38);
+        float m[16];
+        if (!parent || !SafeCopy(m, static_cast<char*>(parent) + 0x80, 64)) continue;
+        const float sc = (m[15] > 0.05f && m[15] < 20.0f) ? m[15] : 1.0f;
+        float out[3];
+        {
+            std::lock_guard<std::mutex> lock(g_massMutex);
+            bool fresh = false;
+            MassSlot* e = SlotFor(g_massSlots, kMassSlots, butt, &MassSlot::node, GetTickCount64(), fresh);
+            if (!e) continue;
+            if (fresh && !SafeCopy(e->local, static_cast<char*>(butt) + 0x70, 12)) continue;
+            e->ms = GetTickCount64();
+            float p[3];
+            for (int k = 0; k < 3; ++k)
+                p[k] = m[12 + k] + sc * (e->local[0] * m[k] + e->local[1] * m[4 + k] + e->local[2] * m[8 + k]);
+            bm::Step(e->s, p, axes, 1.0f, side == 0 ? 1 : 0, dt, P, out);
+        }
+        const float f = g_cfg.gluteScale * j;
+        const Vec3 w = {f * (out[0] * axes[0] + out[1] * axes[3] + out[2] * axes[6]),
+                        f * (out[0] * axes[1] + out[1] * axes[4] + out[2] * axes[7]),
+                        f * (out[0] * axes[2] + out[1] * axes[5] + out[2] * axes[8])};
+        const float add[3] = {Dot(w, Row(parent, 0x80, 0)), Dot(w, Row(parent, 0x80, 1)), Dot(w, Row(parent, 0x80, 2))};
+        v.AddTo(butt, add);
+        if constexpr (kDiag) {
+            g_gluteSteps.fetch_add(1, std::memory_order_relaxed);
+            for (int k = 0; k < 3; ++k) KeepMaxUm(g_gluteMaxUm[k], f * out[k]);
+        }
+    }
+}
+
 static void PreUpdate(ActorView& v) {
     const float dt = *reinterpret_cast<const float*>(g_addr[kFrameTime]);
     // a zero frame time is the game paused (photo mode): its springs hold their last bounce and nothing is
@@ -2385,6 +2706,7 @@ static void PreUpdate(ActorView& v) {
     }
     if (!v.com) return;
     v.paused = paused;
+    if (!paused && (g_cfg.relDamping || g_cfg.gluteOn)) RelativeDamping(v, dt);   // (it also finds the glute anchors)
     const TuneSettings& T = Tune();
     const bool tuning = T.springs || T.scaled || T.damping;
     // gravity relative to standing, per 1 g, in COM's frame (its world rows are its axes): g_now - g_standing
@@ -2825,6 +3147,10 @@ static void PostUpdate(ActorView& v, int site) {
             (wBack * faceUp.y * lvBack + (wLeft * kLeftSide[side].y + wRight * kRightSide[side].y) * sideK * lvSide +
              wFwd * fwd) / 100,
             (wBack * faceUp.z * lvBack + (wLeft * kLeftSide[side].z + wRight * kRightSide[side].z) * sideK * lvSide) / 100};
+        if (g_cfg.massOn && !v.paused) {   // the whole breast as one mass on its anchor
+            float mo[3];
+            if (BreastMass(v, a, chest, side, mo)) off = {off.x + mo[0], off.y + mo[1], off.z + mo[2]};
+        }
         const float t[3] = {a.rest[0] + off.x, a.rest[1] + off.y, a.rest[2] + off.z};
         WriteTranslation(a.node, t);
         std::memcpy(v.anchorLocal[side], t, 12);
@@ -2857,6 +3183,7 @@ static void PostUpdate(ActorView& v, int site) {
             }
         }
     }
+    if (g_cfg.gluteOn && !v.paused) GluteMass(v);
     if (v.settleOn && !v.paused) AddSettle(v);   // the other parts' gravity shapes, on top like the breasts'
     if (kCollisions && g_cfg.collision) {
         v.site = site;
@@ -4911,6 +5238,532 @@ static void Dents(ActorView& v, const BodyNodes& b, const Vec3 pos[kNumSoft], co
     g_dentTicks.fetch_add(static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
 }
 
+// ------------------------------------------------------------------ FreeMorph
+// The body's performance morph.dat carries ONE morph, TFFREE, with a record for every vertex of both breasts; one
+// MorphDriver record for it (driver COM, MaxAnimationDistance -1: the game never computes its weight) sits on the
+// naked body's armor addon, and the game binds it to the body geometry and feeds its weight (+0x28) into the
+// geometry's performance-morph row every frame.  For the player this plugin holds that weight and rewrites the
+// morph's records on the GPU through the engine's own buffer update (UpdateBuffer, ID 142878: staged, then copied by
+// the upload service; the morph pass reads every record each frame and renormalises the normals).  Only the player's
+// body is written; the mode key (iModeKey, none by default) switches between:
+//   still dent   the file's own records (nothing written; A-Body's file holds the body at rest);
+//   moving dent  the plugin writes a 1 cm dent going round the left breast every frame (a check of the write path);
+//   contact      the plugin writes freemorph_core.h's flesh contact: the hands and arms press the breasts;
+//   off          weight 0 (the plain body).
+// The targets buffer: geometry +0x1F4 (its morph row) -> the MorphData table [ID 837372] column +0xF8 (writer map
+// +0x2C8, data +0x3C8) -> the row's handle -> +0x20 -> {targets holder, sets holder, ticket} -> holder {Buffer*, SRV
+// index}; the Buffer keeps its size at +0 and its usage at +0x0C.
+using FmUpdateBufferFn = void (*)(void* buffer, std::uint64_t offset, const void* src, std::uint64_t size, std::uint64_t* ticket);
+#pragma comment(lib, "user32.lib")   // GetAsyncKeyState, GetForegroundWindow (the mode key)
+#include <condition_variable>
+#include <thread>
+
+static bool FmIsOurs(void* data) {
+    if (!data || !g_fmOk) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_fmMapMutex);
+        const auto it = g_fmOurs.find(data);
+        if (it != g_fmOurs.end()) return it->second;
+    }
+    void* entry = nullptr;
+    char name[64];
+    bool ours = false;
+    if (SafeCopy(&entry, static_cast<char*>(data) + 0x10, 8) && PoolString(entry, name, sizeof(name))) ours = g_fm.morph == name;
+    std::lock_guard<std::mutex> lock(g_fmMapMutex);
+    if (g_fmOurs.size() < 4096) g_fmOurs.emplace(data, ours);
+    return ours;
+}
+
+static void LoadFreeMorph() {
+    char dir[MAX_PATH], path[MAX_PATH];
+    TuneDir(dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s\\FreeMorph.bin", dir);
+    if (!g_cfg.fmEnabled) {
+        Log("free morph: off ([FreeMorph] bEnabled)");
+        return;
+    }
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        Log("free morph: no %s: off", path);
+        return;
+    }
+    LARGE_INTEGER sz{};
+    std::vector<std::uint8_t> buf;
+    DWORD got = 0;
+    const bool read = GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (128ll << 20) &&
+                      (buf.resize(static_cast<size_t>(sz.QuadPart)), ReadFile(f, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr)) &&
+                      got == buf.size();
+    CloseHandle(f);
+    std::string err;
+    if (!read || !fm::Load(buf.data(), buf.size(), g_fm, err)) {
+        Log("free morph: %s not read: %s; off", path, read ? err.c_str() : "a read error");
+        return;
+    }
+    g_fm.prm.cap1 *= g_cfg.fmCapScale;
+    g_fm.prm.cap2 *= g_cfg.fmCapScale;
+    if (g_cfg.fmGrip >= 0.0f) g_fm.prm.grip = g_cfg.fmGrip * 1e-3f;
+    if (g_cfg.fmHoldGive >= 0.0f) g_fm.prm.regT = g_cfg.fmHoldGive * 1e-3f;
+    g_fmSliderSlot.assign(g_fm.sliders.size(), -1);
+    int sliders = 0;
+    for (size_t m = 0; m < g_fm.sliders.size(); ++m) {
+        const std::string& n = g_fm.sliders[m];
+        if (n == "Thin") g_fmSliderSlot[m] = 100;
+        else if (n == "Strong") g_fmSliderSlot[m] = 101;
+        else if (n == "Overweight") g_fmSliderSlot[m] = 102;
+        else
+            for (int k = 0; k < kNumSliders; ++k)
+                if (n == kSliderKey[k]) g_fmSliderSlot[m] = k;
+        sliders += g_fmSliderSlot[m] >= 0;
+    }
+    g_fmBoneNames.clear();
+    for (size_t i = 0; i < g_fm.bones.size(); ++i) {
+        std::string x = g_fm.bones[i];
+        for (char& c : x) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        g_fmBoneNames.emplace(x, static_cast<int>(i));
+    }
+    size_t entries = 0;
+    char regs[400] = "";
+    size_t rl = 0;
+    for (const fm::Region& R : g_fm.regions) {
+        entries += R.idx.size();
+        rl += snprintf(regs + rl, sizeof(regs) - rl, "%s%s %u nodes / %u vertices", rl ? ", " : "", R.name.c_str(), R.n, R.nv);
+    }
+    g_fmOk = true;
+    g_fmMode.store(g_cfg.fmStartMode);
+    Log("free morph: %s (%zu bytes): morph %s, %u body vertices, %u records (%s), %zu limb shapes, %zu bones, %zu flesh "
+        "table entries; sliders matched %d of %zu; the grip drags up to %.1f mm (a spring of %.0f N/m), the contact gives %.1f "
+        "mm/N; the press capped from %.0f%% to %.0f%% of the tissue's depth; "
+        "the mode key %d (0 = none), starting in %s", path, buf.size(), g_fm.morph.c_str(), g_fm.bodyVerts, g_fm.records, regs,
+        g_fm.shapes.size(), g_fm.bones.size(), entries, sliders, g_fm.sliders.size(), g_fm.prm.grip * 1e3,
+        g_fm.prm.regT > 0.0f ? 1.0f / g_fm.prm.regT : 0.0f, g_fm.prm.reg * 1e3, g_fm.prm.cap1 * 100,
+        g_fm.prm.cap2 * 100, g_cfg.fmModeKey, kFmModeName[g_cfg.fmStartMode]);
+}
+
+struct FmBody {
+    void* com = nullptr;
+    std::vector<void*> node, nodeName;
+    std::vector<int> softOf;
+    int found = 0;
+    bool complete = false;
+    std::uint64_t retryMs = 0;
+};
+struct FmBuf {
+    void* geom = nullptr;
+    std::uint32_t row = 0xFFFFFFu, idx = 0, srv = 0, setsSrv = 0;
+    void *handle = nullptr, *obj = nullptr, *holder = nullptr, *buffer = nullptr, *resource = nullptr, *sets = nullptr;
+    std::uint64_t size = 0, setsSize = 0;
+    std::uint8_t usage = 0;
+};
+static FmBody g_fmBody;               // the player's
+static fm::State g_fmDentState;   // the dents' (the update thread); the contact's is the worker's own
+static std::vector<std::uint8_t> g_fmRec;   // the records as last made (record order)
+static std::vector<fm::Xf> g_fmWorld;
+static std::vector<std::uint8_t> g_fmHave;
+static std::mutex g_fmStateMutex;     // the player's free morph (one update at a time)
+static int g_fmModeNow = -1;          // the mode the state was made for
+static float g_fmTheta = 0;           // the moving dent's angle (rad)
+static bool g_fmWritten = false;      // the plugin has written records since the game started
+static void* g_fmLastBuffer = nullptr;
+static void* g_fmLastInst = nullptr;
+static bool g_fmLoggedBody = false;
+
+static void FmFindNodes(void* com, FmBody& fb) {   // every node under COM, by name in any case; the soft bone above each
+    const size_t nb = g_fm.bones.size();
+    fb.com = com;
+    fb.node.assign(nb, nullptr);
+    fb.nodeName.assign(nb, nullptr);
+    fb.softOf.assign(nb, -1);
+    void* stack[1024];
+    int sp = 0, visited = 0;
+    stack[sp++] = com;
+    char name[96];
+    while (sp && visited < 8192) {
+        void* n = stack[--sp];
+        ++visited;
+        if (NodeName(n, name, sizeof(name))) {
+            for (char* c = name; *c; ++c) *c = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
+            const auto it = g_fmBoneNames.find(name);
+            if (it != g_fmBoneNames.end() && !fb.node[static_cast<size_t>(it->second)]) {
+                fb.node[static_cast<size_t>(it->second)] = n;
+                SafeCopy(&fb.nodeName[static_cast<size_t>(it->second)], static_cast<char*>(n) + 0x10, 8);
+            }
+        }
+        void* kids[256];
+        const int nk = Children(n, g_childLayout, kids, 256);
+        for (int i = 0; i < nk && sp < 1024; ++i) stack[sp++] = kids[i];
+    }
+    fb.found = 0;
+    for (size_t i = 0; i < nb; ++i) {
+        if (!fb.node[i]) continue;
+        ++fb.found;
+        void* p = fb.node[i];
+        for (int depth = 0; p && p != com && depth < 64 && fb.softOf[i] < 0; ++depth) {
+            char pn[64];
+            if (NodeName(p, pn, sizeof(pn)))
+                for (int k = 0; k < kNumSoft; ++k)
+                    if (!_stricmp(pn, kSoft[k].name)) {
+                        fb.softOf[i] = k;
+                        break;
+                    }
+            if (!SafeCopy(&p, static_cast<char*>(p) + 0x38, 8)) break;
+        }
+    }
+    std::vector<std::uint8_t> used(nb, 0);   // complete: every bone a node or a limb shape leans on was found
+    for (const fm::Region& R : g_fm.regions)
+        for (const fm::Lbs& l : R.lbs) used[l.bone] = 1;
+    for (const fm::Shape& sh : g_fm.shapes) {
+        if (sh.kind == 0) used[sh.boneA] = used[sh.boneB] = 1;
+        else used[sh.bone] = 1;
+    }
+    bool all = true;
+    for (size_t i = 0; i < nb; ++i) all = all && (!used[i] || fb.node[i]);
+    fb.complete = all;
+}
+
+static bool FmStillValid(const FmBody& fb) {
+    for (size_t i = 0; i < fb.node.size(); ++i) {
+        if (!fb.node[i]) continue;
+        void* name = nullptr;
+        if (!SafeCopy(&name, static_cast<char*>(fb.node[i]) + 0x10, 8) || name != fb.nodeName[i]) return false;
+    }
+    return true;
+}
+
+// the targets buffer of a geometry's free morph (false + why when any step is missing or not as expected)
+static bool FmResolve(void* geom, FmBuf& o, char* why, size_t cap) {
+    o = FmBuf{};
+    o.geom = geom;
+    std::uintptr_t vt = 0;
+    if (!geom || !SafeCopy(&vt, geom, 8)) return snprintf(why, cap, "no geometry"), false;
+    if (g_fmGeomVt && vt != g_fmGeomVt) return snprintf(why, cap, "the driver's geometry %p is not a BSGeometry", geom), false;
+    std::uint32_t row = 0;
+    if (!SafeCopy(&row, static_cast<char*>(geom) + 0x1F4, 4)) return snprintf(why, cap, "the geometry's row not readable"), false;
+    o.row = row & 0xFFFFFFu;
+    if (o.row == 0xFFFFFFu) return snprintf(why, cap, "the geometry has no morph row yet"), false;
+    void* tbl = nullptr;
+    void* col = nullptr;
+    std::uint32_t* map = nullptr;
+    void** data = nullptr;
+    if (!SafeCopy(&tbl, reinterpret_cast<void*>(g_fmTable), 8) || !tbl || !SafeCopy(&col, static_cast<char*>(tbl) + 0xF8, 8) || !col ||
+        !SafeCopy(&map, static_cast<char*>(col) + 0x2C8, 8) || !map || !SafeCopy(&data, static_cast<char*>(col) + 0x3C8, 8) || !data)
+        return snprintf(why, cap, "the morph table not readable"), false;
+    if (!SafeCopy(&o.idx, map + o.row, 4)) return snprintf(why, cap, "the row's entry not readable"), false;
+    if (!o.idx) return snprintf(why, cap, "the morph row %06X has no handle yet", o.row), false;
+    if (!SafeCopy(&o.handle, data + o.idx, 8) || !o.handle || !SafeCopy(&o.obj, static_cast<char*>(o.handle) + 0x20, 8) || !o.obj ||
+        !SafeCopy(&o.holder, o.obj, 8) || !o.holder || !SafeCopy(&o.buffer, o.holder, 8) || !o.buffer ||
+        !SafeCopy(&o.srv, static_cast<char*>(o.holder) + 8, 4))
+        return snprintf(why, cap, "the row's handle has no targets buffer"), false;
+    if (!SafeCopy(&o.size, o.buffer, 8) || !SafeCopy(&o.usage, static_cast<char*>(o.buffer) + 0x0C, 1))
+        return snprintf(why, cap, "the targets buffer not readable"), false;
+    SafeCopy(&o.resource, static_cast<char*>(o.buffer) + 0xA0, 8);
+    void* sh = nullptr;
+    if (SafeCopy(&sh, static_cast<char*>(o.obj) + 8, 8) && sh && SafeCopy(&o.sets, sh, 8) && o.sets) {
+        SafeCopy(&o.setsSrv, static_cast<char*>(sh) + 8, 4);
+        SafeCopy(&o.setsSize, o.sets, 8);
+    }
+    // the engine rounds a GPU buffer up to 64 KB (65,536 bytes for 48,784 bytes of records)
+    const std::uint64_t needT = static_cast<std::uint64_t>(g_fm.records) * 16u, needS = static_cast<std::uint64_t>(g_fm.bodyVerts) * 20u;
+    std::uint32_t stride = 0;
+    std::uint64_t count = 0;
+    SafeCopy(&stride, static_cast<char*>(o.buffer) + 0x10, 4);
+    SafeCopy(&count, static_cast<char*>(o.buffer) + 0x20, 8);
+    if (stride != 16 || count != g_fm.records)
+        return snprintf(why, cap, "the targets buffer holds %llu records of %u bytes (want %u of 16)",
+                        static_cast<unsigned long long>(count), stride, g_fm.records), false;
+    if (o.size < needT || o.size >= needT + 0x10000 || o.usage != 1)
+        return snprintf(why, cap, "the targets buffer holds %llu bytes, usage %u (want %llu bytes rounded up to 64 KB, usage 1)",
+                        static_cast<unsigned long long>(o.size), o.usage, static_cast<unsigned long long>(needT)), false;
+    if (o.setsSize < needS || o.setsSize >= needS + 0x10000)
+        return snprintf(why, cap, "the vertex sets buffer holds %llu bytes (want %llu rounded up to 64 KB)",
+                        static_cast<unsigned long long>(o.setsSize), static_cast<unsigned long long>(needS)), false;
+    return true;
+}
+
+static void FmRefuse(const char* why) {
+    g_fmRefused.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_fmLogMutex);
+    strncpy_s(g_fmRefusedWhy, why, _TRUNCATE);
+}
+
+static void FmUpload(const FmBuf& b) {
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    std::uint64_t ticket = 0;
+    reinterpret_cast<FmUpdateBufferFn>(g_fmUpdateBuffer)(b.buffer, 0, g_fmRec.data(), g_fmRec.size(), &ticket);
+    QueryPerformanceCounter(&t1);
+    g_fmWritten = true;
+    g_fmUploads.fetch_add(1, std::memory_order_relaxed);
+    g_fmUploadBytes.fetch_add(g_fmRec.size(), std::memory_order_relaxed);
+    g_fmUploadTicks.fetch_add(static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
+    std::uint64_t lo = g_fmTicketLo.load(std::memory_order_relaxed);
+    if (!lo || ticket < lo) g_fmTicketLo.store(ticket, std::memory_order_relaxed);
+    if (ticket > g_fmTicketHi.load(std::memory_order_relaxed)) g_fmTicketHi.store(ticket, std::memory_order_relaxed);
+}
+
+static void FmPollKey() {   // the player's update thread
+    static bool was = false;
+    const int vk = g_cfg.fmModeKey;
+    bool down = vk > 0 && vk < 256 && (GetAsyncKeyState(vk) & 0x8000) != 0;
+    if (down) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        down = pid == GetCurrentProcessId();
+    }
+    if (down && !was) {
+        static const int kNext[kFmModes] = {kFmOff, kFmStill, kFmMoving, kFmContact};   // contact, moving, still, off, contact
+        const int m = kNext[g_fmMode.load()];
+        g_fmMode.store(m);
+        Log("free morph: mode -> %s (key %d)", kFmModeName[m], vk);
+    }
+    was = down;
+}
+
+// The contact solve runs on a worker thread of its own (one frame behind the bones), so the game's update thread only
+// hands it the bones and writes the records it finished: about 0.1 ms there, the solve's 1-5 ms (while the hands move;
+// 0.2 ms once a held grab has settled) on another core
+struct FmJob {
+    std::vector<fm::Xf> world;
+    std::vector<std::uint8_t> have;
+    std::vector<float> sliders;
+    float dt = 0, grip = 0;
+    bool reset = false, ready = false;
+    std::uint64_t epoch = 0;
+};
+static FmJob g_fmJob;                          // (g_fmJobMutex)
+static std::mutex g_fmJobMutex;
+static std::condition_variable g_fmJobCv;
+static std::atomic<bool> g_fmBusy{false};
+static std::mutex g_fmResMutex;
+static std::vector<std::uint8_t> g_fmResRec;   // (g_fmResMutex) the worker's newest records
+static std::uint64_t g_fmResSeq = 0, g_fmResEpoch = 0, g_fmTakenSeq = 0;
+static std::uint64_t g_fmEpoch = 0;            // a new contact session (the mode entered again): older results are dropped
+static bool g_fmPendingReset = false;
+
+static void FmWorker() {
+    fm::State state;
+    std::vector<std::uint8_t> rec(static_cast<size_t>(g_fm.records) * 16u, 0);
+    FmJob job;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(g_fmJobMutex);
+            g_fmJobCv.wait(lk, [] { return g_fmJob.ready; });
+            job = g_fmJob;
+            g_fmJob.ready = false;
+        }
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        if (job.reset || state.r.size() != g_fm.regions.size()) {
+            fm::Clear(g_fm, state);
+            fm::Records(g_fm, state, rec.data());   // everything at rest
+        }
+        const bool changed = fm::Frame(g_fm, job.world.data(), job.have.data(), job.sliders.data(), job.dt, job.grip, state);
+        if (changed) fm::Records(g_fm, state, rec.data());
+        QueryPerformanceCounter(&t1);
+        const std::uint64_t ticks = static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart);
+        g_fmSolves.fetch_add(1, std::memory_order_relaxed);
+        g_fmSolveTicks.fetch_add(ticks, std::memory_order_relaxed);
+        KeepMaxU(g_fmSolveMaxUs, static_cast<float>(static_cast<double>(ticks) * 1e6 / static_cast<double>(QpcFreq())));
+        {
+            bool anyNear = false;
+            std::lock_guard<std::mutex> lk(g_fmLogMutex);
+            for (size_t ri = 0; ri < state.r.size() && ri < 8; ++ri) {
+                const fm::Stats& st = state.r[ri].stats;
+                anyNear = anyNear || st.limbNear;
+                g_fmLast[ri] = {st.candidates, st.contacts, st.held, st.slipping, st.capped, st.sweeps, st.deepest, st.rise, st.inLimb};
+            }
+            if (anyNear) g_fmNear.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (changed || job.reset) {
+            std::lock_guard<std::mutex> lk(g_fmResMutex);
+            g_fmResRec = rec;
+            ++g_fmResSeq;
+            g_fmResEpoch = job.epoch;
+        }
+        g_fmBusy.store(false);
+    }
+}
+
+static void FmSubmit(const float* sliders, float dt, float grip) {   // the update thread
+    static std::once_flag once;
+    std::call_once(once, [] { std::thread(FmWorker).detach(); });
+    if (g_fmBusy.load()) {
+        g_fmSkipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_fmJobMutex);
+        g_fmJob.world = g_fmWorld;
+        g_fmJob.have = g_fmHave;
+        g_fmJob.sliders.assign(sliders, sliders + (g_fm.sliders.size() < 32 ? g_fm.sliders.size() : 32));
+        g_fmJob.sliders.resize(g_fm.sliders.size(), 0.0f);
+        g_fmJob.dt = dt;
+        g_fmJob.grip = grip;
+        g_fmJob.reset = g_fmPendingReset;
+        g_fmJob.epoch = g_fmEpoch;
+        g_fmJob.ready = true;
+        g_fmPendingReset = false;
+        g_fmBusy.store(true);
+    }
+    g_fmJobCv.notify_one();
+}
+
+static bool FmTakeResult(std::vector<std::uint8_t>& out) {   // the update thread: the worker's newest, once
+    std::lock_guard<std::mutex> lk(g_fmResMutex);
+    if (g_fmResSeq == g_fmTakenSeq || g_fmResEpoch != g_fmEpoch || g_fmResRec.size() != out.size()) return false;
+    g_fmTakenSeq = g_fmResSeq;
+    out = g_fmResRec;
+    return true;
+}
+
+// The player's free morph this frame (from Collide, after the pushes): the weight, the buffer, the mode's records
+static void FmUpdate(ActorView& v, const Vec3 pos[kNumSoft], const bool have[kNumSoft], const Vec3 push[kNumSoft],
+                     const bool pushOn[kNumSoft]) {
+    if (!g_fmOk || v.site != 2) return;
+    if (!v.fmInst) {
+        g_fmNoDriver.fetch_add(1, std::memory_order_relaxed);
+        static std::uint64_t lastMs = 0;
+        const std::uint64_t now = GetTickCount64();
+        if (now - lastMs > 30000) {
+            lastMs = now;
+            Log("free morph: the player's body has no %s driver bound (dressed, or the naked body's performance morphs did not "
+                "load: then equip and unequip anything, or save and load)", g_fm.morph.c_str());
+        }
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_fmStateMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    FmPollKey();
+    const int mode = g_fmMode.load();
+    *reinterpret_cast<volatile float*>(static_cast<char*>(v.fmInst) + 0x28) = mode == kFmOff ? 0.0f : 1.0f;
+    g_fmWeightWrites.fetch_add(1, std::memory_order_relaxed);
+    if (g_fmRec.size() != static_cast<size_t>(g_fm.records) * 16u) {   // the file's still dent, as the plugin makes it
+        g_fmRec.assign(static_cast<size_t>(g_fm.records) * 16u, 0);
+        fm::DentField(g_fm, 0.0f, 0, g_fmDentState);
+        fm::Records(g_fm, g_fmDentState, g_fmRec.data());
+    }
+    FmBuf buf;
+    char why[200];
+    const bool bufOk = FmResolve(v.fmGeom, buf, why, sizeof(why));
+    if (v.fmInst != g_fmLastInst || !g_fmLoggedBody) {
+        g_fmLastInst = v.fmInst;
+        g_fmLoggedBody = true;
+        void* md = nullptr;
+        std::uint32_t cnt = 0;
+        void* names = nullptr;
+        char first[64] = "";
+        if (v.fmGeom && SafeCopy(&md, static_cast<char*>(v.fmGeom) + 0x1C0, 8) && md) {
+            SafeCopy(&cnt, static_cast<char*>(md) + 0x28, 4);
+            void* e = nullptr;
+            if (SafeCopy(&names, static_cast<char*>(md) + 0x30, 8) && names && cnt && cnt < 4096 && SafeCopy(&e, names, 8))
+                PoolString(e, first, sizeof(first));
+        }
+        Log("free morph: the player's body (COM %p): the %s driver %p bound to geometry %p, its performance morph data %p "
+            "(%u morphs, the first '%s'); the targets buffer: %s", v.com, g_fm.morph.c_str(), v.fmInst, v.fmGeom, md, cnt, first,
+            bufOk ? "found" : why);
+    }
+    if (bufOk && buf.buffer != g_fmLastBuffer) {
+        g_fmLastBuffer = buf.buffer;
+        g_fmBufferChanges.fetch_add(1, std::memory_order_relaxed);
+        Log("free morph: targets buffer %p (resource %p, SRV index %u): %llu bytes = %u records, usage %u; vertex sets %p, "
+            "%llu bytes (SRV %u); morph row %06X, entry %u, handle %p", buf.buffer, buf.resource, buf.srv,
+            static_cast<unsigned long long>(buf.size), g_fm.records, buf.usage, buf.sets, static_cast<unsigned long long>(buf.setsSize),
+            buf.setsSrv, buf.row, buf.idx, buf.handle);
+        std::uint32_t head[12] = {};
+        SafeCopy(head, buf.buffer, sizeof(head));
+        Log("free morph: the targets buffer's first 48 bytes: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X",
+            head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], head[8], head[9], head[10], head[11]);
+        if (g_fmWritten || mode != kFmStill) g_fmModeNow = -1;   // a new buffer holds the file's records: write ours again
+    }
+    const bool fresh = mode != g_fmModeNow;
+    if (fresh) {
+        g_fmModeNow = mode;
+        fm::Clear(g_fm, g_fmDentState);
+    }
+    bool want = false;
+    const float dt = g_addr[kFrameTime] ? *reinterpret_cast<const float*>(g_addr[kFrameTime]) : 1.0f / 60.0f;   // (the tests: no game)
+    if (mode == kFmStill) {
+        if (fresh && g_fmWritten) {   // after the plugin's own writes the file's dent is gone: write it back
+            fm::DentField(g_fm, 0.0f, 0, g_fmDentState);
+            fm::Records(g_fm, g_fmDentState, g_fmRec.data());
+            want = true;
+        }
+    } else if (mode == kFmMoving) {
+        if (fresh) g_fmTheta = 0.0f;
+        if (dt > 0.0f && dt < 0.5f) g_fmTheta = std::fmod(g_fmTheta + 6.2831853f * g_cfg.fmDentSpeed * dt, 6.2831853f);
+        fm::DentField(g_fm, g_fmTheta, 0, g_fmDentState);
+        fm::Records(g_fm, g_fmDentState, g_fmRec.data());
+        want = true;
+    } else if (mode == kFmContact) {
+        if (fresh) {   // the dent gone, everything at rest; the solve starts again from rest
+            fm::Records(g_fm, g_fmDentState, g_fmRec.data());
+            want = true;
+            ++g_fmEpoch;
+            g_fmPendingReset = true;
+        }
+        if (!g_fmBody.complete || g_fmBody.com != v.com || !FmStillValid(g_fmBody)) {
+            const std::uint64_t now = GetTickCount64();
+            if (g_fmBody.com != v.com || now >= g_fmBody.retryMs) {
+                FmFindNodes(v.com, g_fmBody);
+                g_fmBody.retryMs = now + 2000;
+                Log("free morph: the player's bones: %d of %zu found%s", g_fmBody.found, g_fm.bones.size(),
+                    g_fmBody.complete ? "" : " (some a breast node or a limb shape needs are missing: no contact)");
+            }
+        }
+        if (g_fmBody.complete) {
+            LARGE_INTEGER t0, t1;
+            QueryPerformanceCounter(&t0);
+            // the bones' worlds, the soft bones (and everything under them) where this frame's springs and pushes put them
+            const size_t nb = g_fm.bones.size();
+            g_fmWorld.resize(nb);
+            g_fmHave.assign(nb, 0);
+            BodyNodes bn;
+            const bool haveNodes = GetNodes(v.com, bn);
+            Vec3 shift[kNumSoft];
+            bool shiftOk[kNumSoft] = {};
+            for (int s = 0; s < kNumSoft && haveNodes; ++s) {
+                Xf own;
+                if (have[s] && bn.node[SoftN(s)] && WorldOf(bn.node[SoftN(s)], own)) {
+                    const Vec3 at = pushOn[s] ? Add(pos[s], push[s]) : pos[s];
+                    shift[s] = Sub(at, own.pos);
+                    shiftOk[s] = true;
+                }
+            }
+            for (size_t i = 0; i < nb; ++i) {
+                Xf x;
+                if (!g_fmBody.node[i] || !WorldOf(g_fmBody.node[i], x)) continue;
+                fm::Xf& o = g_fmWorld[i];
+                for (int k = 0; k < 3; ++k) o.ax[k] = {x.ax[k].x, x.ax[k].y, x.ax[k].z};
+                o.pos = {x.pos.x, x.pos.y, x.pos.z};
+                o.scale = x.scale;
+                const int s = g_fmBody.softOf[i];
+                if (s >= 0 && shiftOk[s]) o.pos = {o.pos.x + shift[s].x, o.pos.y + shift[s].y, o.pos.z + shift[s].z};
+                g_fmHave[i] = 1;
+            }
+            // the solve on the worker thread (this frame's bones, if it is free; else this frame waits for the next one)
+            FmSubmit(v.fmMorph, dt > 0.0f && dt < 0.5f ? dt : 1.0f / 60.0f, g_fm.prm.grip);
+            if (FmTakeResult(g_fmRec)) want = true;   // the newest finished frame (one frame behind the bones)
+            QueryPerformanceCounter(&t1);
+            g_fmSubmitTicks.fetch_add(static_cast<std::uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
+        }
+    }
+    // a write that could not happen (the buffer not there yet) stays due until it can: the records are whole each time
+    static bool due = false;
+    due = due || want;
+    if (due) {
+        if (!g_fmWritesOk) FmRefuse("the engine's buffer update or morph table is not as read at load");
+        else if (!bufOk) FmRefuse(why);
+        else {
+            FmUpload(buf);
+            due = false;
+        }
+    }
+}
+
+// on such a body in contact mode the free morph alone answers its own arms on the breasts (bOwnPushes=1: all of it)
+static bool FmContactOn(const ActorView& v) {
+    return g_fmOk && v.site == 2 && v.fmInst && g_fmMode.load() == kFmContact && g_fmBody.complete && !g_cfg.fmOwnPushes;
+}
+
 static void Collide(ActorView& v) {
     if (g_layoutState.load() == 0)
         for (const Anchor& a : v.anchors)
@@ -4928,6 +5781,7 @@ static void Collide(ActorView& v) {
 
     LimbCap caps[kNumColliders][2];
     LimbCaps(b, size, 1.0f, caps);
+    const bool fmOn = FmContactOn(v);   // FreeMorph
 
     // soft bones (world): from their spring's position plus this frame's gravity (anchor offset and slump), and,
     // for soft against soft, without that gravity: lying on a side it moves one breast toward the other by design
@@ -5036,7 +5890,8 @@ static void Collide(ActorView& v) {
         if (d.group == 3 && !g_cfg.glutes) continue;
         const float r = d.radius * g_cfg.softScale * size * (d.group == 0 ? bs : 1.0f);
         Vec3 total = {0, 0, 0};
-        for (int k = 0; k < kNumColliders; ++k) {
+        const bool ownByFm = fmOn && d.group == 0;   // FreeMorph: the breasts answer their own arms by the free morph
+        for (int k = 0; k < kNumColliders && !ownByFm; ++k) {
             const int rule = kGroupMeets[d.group][k];
             if (!rule) continue;
             for (int s = 0; s < 2; ++s) {
@@ -5135,7 +5990,7 @@ static void Collide(ActorView& v) {
         touched[i] = L >= 1e-4f;
     }
     if (g_cfg.couplePushes) CouplePushes(push, pushOn, touched, size, bs);
-    if (g_cfg.breastLift && ArmsNearBreasts(caps, pos, pushOn, size)) LiftBreasts(v, b, push, pushOn, pos, parentXf, size, bs);
+    if (g_cfg.breastLift && !fmOn && ArmsNearBreasts(caps, pos, pushOn, size)) LiftBreasts(v, b, push, pushOn, pos, parentXf, size, bs);
     for (int i = 0; i < kNumSoft; ++i) {
         if (!pushOn[i]) continue;
         const Vec3 total = push[i];
@@ -5156,7 +6011,8 @@ static void Collide(ActorView& v) {
         std::uint32_t prev = g_maxPushMm.load(std::memory_order_relaxed);
         while (mm > prev && !g_maxPushMm.compare_exchange_weak(prev, mm)) {}
     }
-    if (g_cfg.dents && g_dentOk) Dents(v, b, pos, push, pushOn, have, size);
+    if (g_cfg.dents && g_dentOk && !fmOn) Dents(v, b, pos, push, pushOn, have, size);
+    FmUpdate(v, pos, have, push, pushOn);   // FreeMorph (the player)
     if (snap) Log("  contacts (distance/contact cm):%s", cl ? contacts : " none");
 
     // share this body's shapes for the bodies near it: soft bones where they are this frame (gravity in, no pushes)
@@ -5642,14 +6498,110 @@ static void OpenLog() {
     if (fopen_s(&f, g_logPath, "w") == 0 && f) fclose(f);   // fresh log each run
 }
 
+// FreeMorph: the game's addresses (Address Library) and the code they lead to, as read from the exe
+static void FmResolveAddresses(const char* lib, std::uint32_t runtime, std::uint64_t imageSize) {
+    if (!g_fmOk) return;
+    enum { kMdVt, kGeomVt, kUpd, kTable, kWeights, kMorphDb, kMorphDbCall, kKeep, kN };
+    const std::uint32_t ids[kN] = {405148, 498008, 142878, 837372, 147269, 145235, 145236, 935617};
+    std::uint32_t rvas[kN] = {};
+    char why[2 * MAX_PATH];
+    if (!ReadAddressLibrary(lib, runtime, ids, kN, rvas, why, sizeof(why))) {
+        g_fmOk = false;
+        Log("free morph: %s; off", why);
+        return;
+    }
+    for (int i = 0; i < kN; ++i)
+        if (static_cast<std::uint64_t>(rvas[i]) >= imageSize) {
+            g_fmOk = false;
+            Log("free morph: ID %u is outside the game; off", ids[i]);
+            return;
+        }
+    const std::uintptr_t at[kN] = {g_base + rvas[0], g_base + rvas[1], g_base + rvas[2], g_base + rvas[3], g_base + rvas[4],
+                                   g_base + rvas[5], g_base + rvas[6], g_base + rvas[7]};
+    if (!RttiNameIs(at[kMdVt], ".?AVMorphDriverInstance@@")) {
+        g_fmOk = false;
+        Log("free morph: MorphDriverInstance's vtable (ID 405148) NOT as read; off");
+        return;
+    }
+    g_fmMdVt = at[kMdVt];
+    if (RttiNameIs(at[kGeomVt], ".?AVBSGeometry@@")) g_fmGeomVt = at[kGeomVt];
+    // UpdateBuffer (142878): the prologue, the usage test
+    static const std::uint8_t kUpdBytes[44] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18,
+                                               0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x50, 0x49, 0x8B, 0xE9, 0x4D, 0x8B, 0xF0,
+                                               0x4C, 0x8B, 0xFA, 0x48, 0x8B, 0xF9, 0x0F, 0xB6, 0x41, 0x0C, 0x2C, 0x02, 0x3C, 0x01};
+    // (GameBytesAre compares at most 16 bytes: in 16-byte pieces)
+    auto bytesAre = [](std::uintptr_t a, const std::uint8_t* b, size_t n) {
+        for (size_t k = 0; k < n; k += 16)
+            if (!GameBytesAre(a + k, b + k, n - k < 16 ? n - k : 16)) return false;
+        return true;
+    };
+    const bool own = bytesAre(at[kUpd], kUpdBytes, sizeof(kUpdBytes));
+    const bool body = bytesAre(at[kUpd] + 14, kUpdBytes + 14, sizeof(kUpdBytes) - 14);
+    std::uint8_t head[16] = {};
+    SafeCopy(head, reinterpret_cast<void*>(at[kUpd]), sizeof(head));
+    std::uintptr_t jumpTo = 0;
+    if (head[0] == 0xE9) {   // jmp rel32
+        std::int32_t rel;
+        std::memcpy(&rel, head + 1, 4);
+        jumpTo = at[kUpd] + 5 + static_cast<std::intptr_t>(rel);
+    } else if (head[0] == 0xFF && head[1] == 0x25) {   // jmp [rip + disp32]
+        std::int32_t rel;
+        std::memcpy(&rel, head + 2, 4);
+        SafeCopy(&jumpTo, reinterpret_cast<void*>(at[kUpd] + 6 + static_cast<std::intptr_t>(rel)), 8);
+    } else if (head[0] == 0x48 && head[1] == 0xB8 && head[10] == 0xFF && head[11] == 0xE0) {   // mov rax, imm64; jmp rax
+        std::memcpy(&jumpTo, head + 2, 8);
+    }
+    char hookedBy[MAX_PATH] = "";
+    if (jumpTo) {
+        HMODULE hm = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(jumpTo), &hm) && hm) {
+            char full[MAX_PATH];
+            if (GetModuleFileNameA(hm, full, sizeof(full))) {
+                const char* slash = strrchr(full, '\\');
+                strncpy_s(hookedBy, slash ? slash + 1 : full, _TRUNCATE);
+            }
+        }
+        if (!hookedBy[0]) snprintf(hookedBy, sizeof(hookedBy), "memory at %p, no module", reinterpret_cast<void*>(jumpTo));
+    }
+    const bool upd = own || (body && jumpTo);
+    Log("free morph: the buffer update's first bytes in memory: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X "
+        "%02X %02X: %s", head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], head[8], head[9], head[10],
+        head[11], head[12], head[13], own ? "the game's own" : (jumpTo ? "a jump (another plugin's hook) to" : "NOT as read"),
+        own ? "" : hookedBy);
+    // the weight writer (147269) reads the morph table [837372] column +0xF8, its map +0x2C8 and data +0x3C8
+    static const std::uint8_t kLoadTbl[3] = {0x48, 0x8B, 0x05}, kCol[7] = {0x4C, 0x8B, 0x80, 0xF8, 0x00, 0x00, 0x00},
+                              kMap[7] = {0x49, 0x8B, 0x80, 0xC8, 0x02, 0x00, 0x00}, kData[7] = {0x49, 0x8B, 0x87, 0xC8, 0x03, 0x00, 0x00};
+    const bool tbl = GameBytesAre(at[kWeights] + 0x4B, kLoadTbl, 3) && RelTarget(at[kWeights] + 0x4E, at[kWeights] + 0x52) == at[kTable] &&
+                     GameBytesAre(at[kWeights] + 0x52, kCol, 7) && GameBytesAre(at[kWeights] + 0x62, kMap, 7) &&
+                     GameBytesAre(at[kWeights] + 0x17A, kData, 7);
+    // MorphDB (145235) fills the targets buffer by 142878 and keeps {Buffer*, SRV} as the 0x18 object's first holder;
+    // its caller (145236) keeps that object at the handle's +0x20
+    static const std::uint8_t kCall[1] = {0xE8}, kHolder[6] = {0x48, 0x89, 0x18, 0x89, 0x78, 0x08}, kFirst[3] = {0x49, 0x89, 0x06},
+                              kObj[4] = {0x48, 0x89, 0x43, 0x20};
+    const bool db = GameBytesAre(at[kMorphDb] + 0x180, kCall, 1) && RelTarget(at[kMorphDb] + 0x181, at[kMorphDb] + 0x185) == at[kUpd] &&
+                    GameBytesAre(at[kMorphDb] + 0x1C6, kHolder, 6) && GameBytesAre(at[kMorphDb] + 0x1E2, kFirst, 3) &&
+                    GameBytesAre(at[kMorphDbCall] + 0x5D, kObj, 4);
+    std::uint8_t keep = 0xFF;
+    SafeCopy(&keep, reinterpret_cast<void*>(at[kKeep]), 1);
+    g_fmUpdateBuffer = at[kUpd];
+    g_fmTable = at[kTable];
+    g_fmWritesOk = upd && tbl && db && keep == 0;
+    Log("free morph: the game's code: MorphDriverInstance checked (ID 405148), BSGeometry %s; the buffer update (142878) %s, "
+        "the morph table's reads (147269) %s, MorphDB's targets holder (145235/145236) %s; bKeepPerformanceMorphHandle %u%s -> "
+        "the plugin's writes %s", g_fmGeomVt ? "checked" : "NOT checked", own ? "as read" : (upd ? "hooked by another plugin, its body as read (called through the hook)" : "NOT as read"), tbl ? "as read" : "NOT as read",
+        db ? "as read" : "NOT as read", keep, keep == 0 ? " (each body its own copy)" : " (shared copies: writes would reach every body)",
+        g_fmWritesOk ? "on" : "OFF (the still dent alone)");
+}
+
 extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse) {
     if constexpr (kDiag) OpenLog();   // release: no log file at all
     g_startMs = GetTickCount64();
     g_mainThread = GetCurrentThreadId();
     g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
     LoadSettings();
-    Log("TF Physics (logging build: gravity, springs, body shape, tuning files, collisions, dents, "
-        "world-collision proxies). "
+    Log("TF Physics 2.1 (logging build: gravity, springs, body shape, tuning files, collisions, dents, the breast "
+        "and glute masses, FreeMorph, world-collision proxies). "
         "SFSE 0x%08X, game %u.%u.%u (runtime 0x%08X)", sfse->sfseVersion, sfse->runtimeVersion >> 24,
         (sfse->runtimeVersion >> 16) & 0xFF, (sfse->runtimeVersion >> 4) & 0xFFF, sfse->runtimeVersion);
     Log("lying also needs the thighs flat: %.0f-%.0f deg from vertical", g_cfg.thighFlatStartDeg, g_cfg.thighFlatFullDeg);
@@ -5683,6 +6635,10 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     Log("other bodies push at most %.1f cm; dead bodies %d (a dead body lying still: its shapes used up to %.0f ms old)",
         g_cfg.maxPushOther * 100, g_cfg.deadBodies, g_cfg.deadMaxAge * 1000);
     LoadDentRig();
+    LoadFreeMorph();
+    Log("free morph ([FreeMorph]) %d: the grip drags up to %.1f mm, the cap x%.2f, the moving dent %.2f turns a second; in "
+        "contact mode the arms' capsule pushes, the lift and the dents on the breasts %s", g_cfg.fmEnabled, g_fm.prm.grip * 1e3, g_cfg.fmCapScale,
+        g_cfg.fmDentSpeed, g_cfg.fmOwnPushes ? "on too (bOwnPushes)" : "off");
     Log("dents %d: depth x%.2f, a dent follows its contact within %.0f ms; the dents tilt %d", g_cfg.dents, g_cfg.dentScale,
         g_cfg.dentRelax * 1000, g_cfg.dentTilt);
     Log("body shape %d: jiggle x(1 %+.2f thin %+.2f muscular %+.2f heavy), gravity x(1 %+.2f thin %+.2f muscular %+.2f "
@@ -5707,6 +6663,7 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Load(const SFSEInterface* sfse)
     g_tuneStamp = TuneStamp();
     LogTuning("tuning", g_tunes[0]);
     if (kDiag && g_cfg.proxies) ResolveWorldAddresses(lib, sfse->runtimeVersion, nt->OptionalHeader.SizeOfImage);
+    FmResolveAddresses(lib, sfse->runtimeVersion, nt->OptionalHeader.SizeOfImage);   // FreeMorph
     const bool ok = InstallHooks();
     Log(ok ? "hooks installed; logging every 5 s" : "hooks NOT installed");
     return ok;

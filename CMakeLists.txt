@@ -27,7 +27,7 @@ endfunction()
 # (folder names that can't meet the build configurations' own Debug/Release folders: Windows ignores case)
 tfp_plugin(TFPhysics dll_logging)                                                            # the logging build
 tfp_plugin(TFPhysics_release dll_release TFP_RELEASE)                                        # gravity, springs, body shape
-tfp_plugin(TFPhysics_release_collisions dll_release_col TFP_RELEASE TFP_RELEASE_COLLISIONS)  # what A-Body 1.5 ships
+tfp_plugin(TFPhysics_release_collisions dll_release_col TFP_RELEASE TFP_RELEASE_COLLISIONS)  # what A-Body 2.0 ships
 
 option(TFP_TESTS "Build the offline tests" ON)
 if(TFP_TESTS)
@@ -52,4 +52,16 @@ if(TFP_TESTS)
     target_link_libraries(tune_dump PRIVATE shell32 ole32)
     set_target_properties(tune_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${tfp_test_dir}/$<0:>")
     add_test(NAME tune_dump COMMAND tune_dump config/TFPhysics.ini WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    # the masses and the relative damping; FreeMorph's solve (its test runs when tests/data/FreeMorph.bin is there)
+    foreach(t breast_mass_test freemorph_test)
+        add_executable(${t} tests/${t}.cpp)
+        target_compile_options(${t} PRIVATE /W4 /EHsc)
+        target_include_directories(${t} PRIVATE src)
+        set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${tfp_test_dir}/$<0:>")
+    endforeach()
+    add_test(NAME breast_mass_test COMMAND breast_mass_test WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/data/FreeMorph.bin")
+        add_test(NAME freemorph_test COMMAND freemorph_test tests/data/FreeMorph.bin tests/data/freemorph_vectors.bin
+                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    endif()
 endif()

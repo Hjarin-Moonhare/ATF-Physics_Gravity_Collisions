@@ -2,7 +2,38 @@
 
 Releases are the builds A-Body ships.
 
-## Development (this source)
+## 2.1 (A-Body 2.0)
+
+- **FreeMorph, hand contact:** the player's own hands and arms press into the breasts. The body carries one free
+  performance morph (`TFFREE`, a record for every vertex of both breasts) driven by one MorphDriver record that the
+  game never weighs (MaxAnimationDistance -1); TF Physics holds its weight at 1 and rewrites its records every frame
+  through the engine's own buffer update. What it writes is a real-time flesh contact (`src\freemorph_core.h`): each
+  breast's skin nodes skinned from their bones and the sliders, the hand and arm shapes (round cones on the finger
+  bones and the arms, rounded boxes on the palms, blended into one smooth surface), and projected Gauss-Seidel on the
+  nodes' contact forces with the breast's precomputed response (Green's functions of its volume down to the chest
+  wall, 3x3 per node pair within 8 cm). A node a limb holds keeps to its point on it while its sideways force stays
+  under the grip (a spring of 100 N/m, at most 1 cm of drag at a firm press), then slides; a press is capped softly
+  from a third to a half of the tissue's depth. The solve runs on a worker thread of its own, one frame behind the
+  bones; a settled hold takes one sweep. The data is `FreeMorph.bin` in `Data\SFSE\Plugins\TFPhysics\`. Every
+  address it uses is checked at start-up, and the writes stay off unless all of them read as expected. In contact
+  the breasts answer the player's own arms through the free morph alone (`[FreeMorph] bOwnPushes`). `[FreeMorph]`.
+- **Breast mass:** each whole breast is one damped mass on its anchor (`L_Pecs`, `R_Pecs`), in the chest's axes (3.0,
+  2.8 and 2.0 Hz; damping ratios 0.45, 0.40, 0.35), driven only by the anchor's acceleration, with lopsided soft limits
+  (2 cm up, 3 down, 1.2 forward, 1.5 back, 2 out, 1.2 in; 25 times stiffer past them, a hard stop at 1.35 times), in
+  1/240 s sub-steps. Its offset goes on the anchor's local position, so the springs, the tips and the nipple under it
+  ride on it. `[BreastMass] bEnabled`, `fScale`.
+- **Glute mass:** the same on `L_Butt` and `R_Butt` (found as the `TF_Glute` springs' parent), in the body's axes:
+  3.0, 2.6 and 2.2 Hz, damping ratios 0.60, 0.55, 0.40, soft limits 1.6 cm up, 2.4 down, 1 fore and aft, 1.2 out,
+  0.8 in. `[GluteMass] bEnabled`, `fScale`.
+- **Relative damping:** before the game's update, each body spring's offset velocity gets + c x its goal's velocity in
+  COM's axes, so the game's damping (on the bone's motion in the world) acts on the motion relative to the body. A
+  steady speed no longer leaves the c v / S lag. Only the body's own springs (`TF_*`, `*_Nipple`); hair and outfit
+  springs keep the game's damping. `[Springs] bRelativeDamping`.
+- **Cuts and teleports:** a mass starts again at rest when its anchor lands over 3 m from where its velocity puts it,
+  and the relative damping skips a spring whose goal moved over 5 m in a frame, so a fall at any speed stays smooth.
+
+## 1.5 (A-Body 1.9)
+
 
 - **Dent rig version 2:** a region can dent all of the skin an arm presses, not one bone's share of it: dent bones
   on every bone that skin hangs on, each moved by one shared field per region (control points on its skin with

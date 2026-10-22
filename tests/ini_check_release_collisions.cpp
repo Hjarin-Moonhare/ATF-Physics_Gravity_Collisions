@@ -12,8 +12,14 @@ int main() {
                 g_cfg.maxPush[1], g_cfg.maxPush[2], g_cfg.maxPush[3], g_cfg.maxPushOther);
     std::printf("bodyShape %d stretchGuard %d gravity %d | world proxies %d layer %d steer %d snapshots %d\n", g_cfg.shape,
                 g_cfg.stretchGuard, g_cfg.enabled, g_cfg.proxies, g_cfg.proxyLayer, g_cfg.steer, g_cfg.snapshots);
+    std::printf("breast mass %d x%.2f, glute mass %d x%.2f, relative damping %d | FreeMorph %d key %d start %d grip %.1f "
+                "give %.1f cap x%.2f own pushes %d\n", g_cfg.massOn, g_cfg.massScale, g_cfg.gluteOn, g_cfg.gluteScale,
+                g_cfg.relDamping, g_cfg.fmEnabled, g_cfg.fmModeKey, g_cfg.fmStartMode, g_cfg.fmGrip, g_cfg.fmHoldGive,
+                g_cfg.fmCapScale, g_cfg.fmOwnPushes);
     const bool ok = kCollisions && !kDiag && g_cfg.collision && g_cfg.others && !g_cfg.othersMeasureOnly &&
-                    !g_cfg.deadBodies && !g_cfg.measureOnly && !g_cfg.proxies && !g_cfg.proxyLayer && !g_cfg.steer;
+                    !g_cfg.deadBodies && !g_cfg.measureOnly && !g_cfg.proxies && !g_cfg.proxyLayer && !g_cfg.steer &&
+                    g_cfg.massOn && g_cfg.gluteOn && g_cfg.relDamping && g_cfg.fmEnabled && g_cfg.fmModeKey == 0 &&
+                    g_cfg.fmStartMode == 2 && !g_cfg.fmOwnPushes;
     std::printf(ok ? "OK\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

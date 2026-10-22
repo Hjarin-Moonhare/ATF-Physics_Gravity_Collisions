@@ -92,10 +92,11 @@ static void Check(const char* what, Rig& r, const Pose& p, const Expect& e, floa
             v.springs[v.nSprings++] = r.thighSprings[s];
         }
     }
-    const bool coll = g_cfg.collision;
+    const bool coll = g_cfg.collision, mass = g_cfg.massOn, glute = g_cfg.gluteOn;
     g_cfg.collision = false;
+    g_cfg.massOn = g_cfg.gluteOn = false;   // the gravity alone: the masses swing an anchor that jumps from case to case
     PostUpdate(v, 2);
-    g_cfg.collision = coll;
+    g_cfg.collision = coll, g_cfg.massOn = mass, g_cfg.gluteOn = glute;
     double worst = 0;
     const float k = kWant > 0 ? kWant : level * size;
     for (int s = 0; s < 2; ++s) {
@@ -509,6 +510,7 @@ int main() {
                 for (int b = 0; b < 4; ++b) v.anchors[s].bones[b] = r.bones[s][b];
             }
             g_cfg.collision = false;
+            g_cfg.massOn = g_cfg.gluteOn = false;   // the gravity alone
             PostUpdate(v, 2);
             for (int s = 0; s < 2; ++s) {
                 const float* t = reinterpret_cast<const float*>(r.pecs[s] + 0x70);
@@ -614,6 +616,9 @@ int main() {
         g_cfg.maxPushOther = g_cfg.deadMaxAge = -1;   // and the other-body cap and the dead bodies' age limit
         g_cfg.couplePushes = false;   // must be read from the file
         g_cfg.breastSize = g_cfg.breastLift = false;   // and these
+        g_cfg.massOn = g_cfg.gluteOn = g_cfg.relDamping = g_cfg.fmEnabled = false;   // the masses, the damping, FreeMorph
+        g_cfg.massScale = g_cfg.gluteScale = -1.0f;
+        g_cfg.fmModeKey = g_cfg.fmStartMode = -1;
         LoadSettings();
         // the new switches are in the file (not just the built-in defaults)
         char got[16];
@@ -639,6 +644,8 @@ int main() {
         for (const char* k : {"bBreastSize", "bBreastLift"})
             keysFile &= GetPrivateProfileStringA("Collision", k, "missing", got, sizeof(got), g_iniPath) && !strcmp(got, "1");
         keysFile &= g_cfg.breastSize && g_cfg.breastLift;
+        keysFile &= g_cfg.massOn && g_cfg.gluteOn && g_cfg.relDamping && g_cfg.fmEnabled && g_cfg.massScale == 1.0f &&
+                  g_cfg.gluteScale == 1.0f && g_cfg.fmModeKey == 0 && g_cfg.fmStartMode == 2 && !g_cfg.fmOwnPushes;
         keysFile &= g_cfg.springGravityHips == 0.0f && g_cfg.springGravityCalves == 0.0f && g_cfg.springGravityArms == 0.0f &&
                   g_cfg.springGravityTorso == 0.0f;   // read from the file
         const bool ok = g_cfg.enabled && g_cfg.sideSlump == 1.0f && g_cfg.faceDownSquash == 1.0f && g_cfg.hangShape == 1.0f &&

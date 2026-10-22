@@ -236,6 +236,15 @@ same tables as `gen_body_shape_data.py` and stops if their bone lists differ.
 The plugin matches each spring record against these values to find the installed setting, and writes a level's
 springs into the record when a tuning file gives a part that level.
 
+### FreeMorph.bin and tests\data\freemorph_vectors.bin
+
+`FreeMorph.bin` is body data: A-Body's build tools make it for each body geometry from its mesh, its bones and its
+sliders (the breasts' zones, a volume of graded layers down to the chest wall per breast, linear elastic flesh under
+stiffer skin, and each skin node's response to a unit force at every node within 8 cm, held as int16 with one scale
+per node; the limb shapes fitted to the game's hands and A-Body's arms). A-Body ships it in
+`Data\SFSE\Plugins\TFPhysics\` for each skin. Its layout is in `docs\BODY_INTEGRATION.md`. The test vectors are
+the design model's solve of a grab on A-Body 2.0's Nude / Tan lines file, from the same bone transforms the C++ reads.
+
 ## Another body
 
 The same measurements, made on that body's own mesh and skeleton. See `docs\BODY_INTEGRATION.md`.

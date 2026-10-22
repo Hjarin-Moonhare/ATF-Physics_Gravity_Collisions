@@ -61,7 +61,9 @@ constructor is `0x877650`.
   3.3 cm at 30, 0.7 cm at 144: the look depends on the frame rate. TF Physics rescales MaxDist each update so the cap
   is the 60 fps size.
 - **Damping and motion.** Damping acts on absolute motion, so a steady speed v leaves a lag of 2 · Damp · v / √S. Soft
-  springs sit pinned at their cap while walking or running.
+  springs sit pinned at their cap while walking or running. Adding c x the goal's velocity to the offset velocity
+  (`+0xB0`, in the driver's frame) before the update takes the lag off (on a model of the solver at 4 m/s: 170 mm to
+  2 mm).
 - **No write when settled.** Nothing is written while |offset| and |velocity| are both ≤ 0.5 mm.
 - **Missing bones.** A spring whose target or driver bone is missing is never created.
 - **Defaults** (in the data's constructor): max animation distance 20, Strength 500, Damp 1, Scale 0.25, MaxDist 1000.
@@ -324,6 +326,28 @@ details are in `research\HAVOK_WORLD.md`.
   installed (`tests\fault_cost.cpp`).
 - **In a busy city area,** with about a dozen A-Body bodies and a hundred other characters updating, TF Physics'
   logging build spends 55-64 ms per second of play: 5-7 µs per hook call, 11-14 µs per body's collisions.
+
+## 8. Performance morphs (FreeMorph's write path)
+
+- **The morph record.** A body geometry gets a performance morph when its morph record (`MRPH`) names a performance
+  folder (TMPP); the folder's `morph.dat` is read like the character creator's (the same format).
+- **MorphDriver.** `MorphDriverInstance` vtable (ID 405148): +0x18 the geometry it drives, +0x20 its data (+0x10 there,
+  the morph's name), +0x28 the weight. With MaxAnimationDistance -1 the modifier loop never computes the weight, so a
+  weight written there stays; the game copies it into the geometry's performance-morph row each frame.
+- **The geometry.** `BSGeometry` vtable (ID 498008); +0x1F4 its morph row (24 bits; 0xFFFFFF until the morphs load),
+  +0x1C0 its performance morph data (+0x28 the morph count, +0x30 the names).
+- **The morph table** (ID 837372): column +0xF8, its writer map at +0x2C8 (row -> entry) and data at +0x3C8 (entry ->
+  handle). The weight writer (ID 147269) reads them there. A handle's +0x20 holds {targets holder, vertex sets holder,
+  ticket}; a holder is {Buffer*, SRV index}. MorphDB (ID 145235, called from 145236) fills the targets buffer and keeps
+  that holder.
+- **The buffer.** +0 its size (rounded up to 64 KB), +0x0C usage (1), +0x10 the stride (16), +0x20 the count, +0xA0
+  the GPU resource. A record is 16 bytes: f16 position delta x3, u16 colour (5:6:5), the normal and tangent deltas as
+  10:10:10.
+- **The update.** `UpdateBuffer` (ID 142878: buffer, offset, source, size, ticket out) stages the bytes and the
+  upload service copies them to the GPU. Writing a whole morph's records each frame through it reaches the screen the
+  next frame; the morph pass reads every record each frame and renormalises the normals.
+- **Copies per body.** `bKeepPerformanceMorphHandle` (ID 935617) is 0 in the game: each body has its own copy of its
+  performance morphs, so a write reaches one body.
 
 ## Still unknown
 

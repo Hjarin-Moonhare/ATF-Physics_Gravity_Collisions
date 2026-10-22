@@ -210,3 +210,47 @@ the code does instead.
 - Fix: dent bones on every bone the skin hangs on, all moved by one shared field (a vertex dents the same whatever
   bones it hangs on); each dent bone also turns with the slope of the dent, inside the fit; a need is capped at the
   rig's depth, and contacts are cleared first.
+
+## Masses, damping and contact
+
+**33. A body moving steadily isn't a spring's motion.**
+- Breaks: the game damps a spring against its bone's motion in the world. At a steady walk or run every soft spring
+  lags c v / S behind its goal and rides at its travel cap, held back the whole time the body moves.
+- Fix: before the game's update the damping on the goal's own velocity is given back to the spring's velocity, so the
+  damping acts on the motion relative to the body; a start, a stop or a bounce still swings it.
+
+**34. A breast moves as one.**
+- Breaks: four springs hung on the anchor each bounce on their own, so a breast moves like four lumps, and its
+  centre never moves the way a real breast's mass does.
+- Fix: the whole breast is one damped mass on its anchor, driven by the anchor's acceleration, with lopsided soft
+  limits; the springs ride on it and add the follow-through.
+
+**35. A cut is a jump, not a speed.**
+- Breaks: taking any speed over a limit for a teleport, a long fall passes the limit, so the masses start again at
+  rest every frame and the damping switches off mid-fall: the breasts stutter.
+- Fix: a mass starts again when its anchor lands over 3 m from where its velocity puts it; the relative damping skips
+  a spring whose goal moved over 5 m in a frame.
+
+**36. A contact is linearised once per frame.**
+- Breaks: a projected Gauss-Seidel contact that takes fresh signed distances and friction cones every sweep jitters 1
+  to 4 mm a frame and creeps.
+- Fix: each contact's distance, normal and slack are taken once at the start of the frame, the contact has a small
+  give of its own (4 mm/N), the limb shapes are blended into one smooth surface (a node between two fingers turns
+  smoothly), and a held point is a springy hold (sideways give 10 mm/N), not a rigid one.
+
+**37. The contact solve never runs on the game's update thread.**
+- Breaks: a grab's frame takes 1 to 5 ms to solve; on a job thread of the game's modifier pass that's a stall in
+  every frame the hands move.
+- Fix: the update thread only hands over the bones and takes the newest finished records; the solve runs on a worker
+  thread of its own, one frame behind, and a frame it's busy with is skipped.
+
+**38. A GPU buffer is checked as the engine sizes it.**
+- Breaks: the engine rounds a buffer up to 64 KB, so a size check against the records' exact size turns every write
+  away.
+- Fix: the targets buffer must hold the data's count of 16-byte records and a size from that up to 64 KB more, usage
+  1; the vertex sets buffer the same. Any mismatch refuses the write and the log says why.
+
+**39. A byte check compares at most 16 bytes at a time.**
+- Breaks: `GameBytesAre` holds 16 bytes; asked for more, it reads a check of the engine's buffer update as failed on
+  the game's own bytes, and every write stays off.
+- Fix: longer checks go in 16-byte pieces.

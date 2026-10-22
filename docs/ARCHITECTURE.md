@@ -7,7 +7,8 @@ each Address Library ID. This page is the map.
 
 1. **The log opens** (logging build only).
 2. **The INI is read** (`LoadSettings`). Every value is clamped, NaN-safe. Then the body's dent rig, if it ships one
-   (`LoadDentRig`: `DentRig.bin` in `Data\SFSE\Plugins\TFPhysics\`).
+   (`LoadDentRig`: `DentRig.bin` in `Data\SFSE\Plugins\TFPhysics\`), and its FreeMorph data (`LoadFreeMorph`:
+   `FreeMorph.bin` in the same folder).
 3. **Game addresses resolve** from the Address Library database the running game would use
    (`ReadAddressLibrary`, `ResolveAddresses`). There are 25 core entries in `kAddrRef`, each an ID plus an offset for
    a place inside a function. Optional ones live in `kWorldAddrRef`; when one of those fails, only that feature turns
@@ -20,6 +21,10 @@ each Address Library ID. This page is the map.
    - `CheckDeadReading`: `Actor::IsDead`, slot 269 of both character vtables.
    - `ResolveTuneAddresses`: the three reads behind the tuning files (the player's gravity scale, a form's ID, what a
      character wears), each by the bytes of the game function that reads it. A read whose check fails is off.
+   - `FmResolveAddresses` (with FreeMorph data): the MorphDriver instance and geometry classes by RTTI name, the
+     engine's buffer update (its first 44 bytes, compared in 16-byte pieces; through another plugin's jump if one is
+     there), the morph table's reads in the weight writer, MorphDB's targets holder, and the per-body morph copies
+     setting. The writes stay off unless every one reads as expected.
    - `ResolveWorldAddresses` (logging build, `[World]` on): the collision object and world classes by RTTI name, the
      two Havok-side functions it calls, and the getters of the motion tables.
 5. **The tuning files are read** (`LoadTuning`, [TUNING.md](TUNING.md)).
@@ -108,6 +113,9 @@ main thread. All state is per body, keyed by game pointers:
 | Factors | 3D root | size, shape and stretch-guard factors | 4-way cache |
 | Other bodies (128) | `COM` | copied shapes, centre, velocity, time | seqlock: readers skip odd or stale entries and shift by velocity × age |
 | Dent bodies (64) | `COM` | the body's dent bones and the bones they read, found once by name; each region's last solve (moves and turns) and the bones it read | a mutex to find or add a body; a body is updated on one thread |
+| Masses (256) | anchor node | each breast's and glute's mass state | one mutex |
+| Spring goals (4096) | spring instance | its goal's last world position, whether it's a body spring, a glute's side | the masses' mutex |
+| FreeMorph (1) | the player's `COM` | the data's bones found under it, the solve's state (on the worker), the newest records | a mutex per hand-over: the job, the result |
 | `g_tunes` (2) | none | what the tuning files say | two copies: a reload fills the one not in use, then switches (`g_tuneNow`, release / acquire); one reload at a time (`g_tuneBusy`) |
 
 **Counters** are relaxed atomics. The log is a queue drained by its own thread, with the file kept open, so a worker
@@ -212,13 +220,58 @@ the same sliders, keeps that solve, so a still pose costs no solve. A dent bone 
 to its rest once. On A-Body's rigs `dent_test` measures about 120 µs per region solve, and about 270 µs per
 solve with a contact; a version 2 region with a contact takes longer (its fit has up to 10 rounds).
 
+## Breast and glute masses (`breast_mass.h`)
+
+`bm::Step` is one damped mass per breast and per glute, in a frame of three axes (the chest's for a breast: X along the
+spine, Y forward, Z to the left; COM's for a glute: up, forward, left), stepped in 1/240 s sub-steps. It is driven by
+the anchor's acceleration alone: standing still or moving at a steady speed it rests. Each axis has its own frequency
+and damping ratio, a soft limit on each side (25 times stiffer past it) and a hard stop at 1.35 times the soft limit.
+A jump past its acceleration limit, or the anchor over 3 m from where its velocity puts it, starts the mass again at
+rest. After the game's update, `BreastMass` adds the breast's offset to the anchor's local position with the gravity
+offset, and `GluteMass` adds the glute's to `L_Butt` / `R_Butt` (in their parent's frame), each x the part's jiggle
+level and `fScale`. The states sit in a table of 256 slots keyed by the anchor node, under one mutex.
+
+## Relative damping
+
+The game's spring solver damps a spring's offset against its bone's motion in the world, so moving at a steady speed v
+leaves a lag of c v / S (c its damping, S its stiffness), and soft springs ride at their travel cap. Before the game's
+update, `RelativeDamping` works out each body spring's goal (its parent's world transform x its rest local) and that
+goal's velocity from the last update, and adds c x that velocity (in COM's axes, the spring's own frame) to the
+spring's offset velocity (`bm::RelativeKick`). The damping then acts on the motion relative to the body. Only springs
+whose target is `TF_*` or `*_Nipple` take it. A goal that moved over 5 m in a frame (a cut, a teleport) is skipped.
+The goals sit in a table of 4096 slots keyed by the spring instance; the same pass finds the glute anchors (the
+`TF_Glute_*` springs' parent).
+
+## FreeMorph (`freemorph_core.h`)
+
+1. **Binding.** The body's MorphDriver record for the free morph (driver `COM`, MaxAnimationDistance -1) is on its
+   naked body's addon; the game binds it to the body geometry that has the morph and copies its weight (instance
+   +0x28) into the geometry's performance-morph row every frame. `Collect` finds it among the modifiers (by the
+   instance's class and the morph name its data holds).
+2. **Every frame, for the player's body** (from `Collide`, after the pushes): `FmUpdate` holds the weight at 1, finds
+   the morph's targets buffer from the geometry (`FmResolve`: the geometry's morph row, the morph table's column, the
+   row's handle, its holder, the buffer, its size, usage, stride and count all checked against the data), finds the
+   data's bones under `COM` once (by name, and the soft bone above each), and hands their world transforms, with this
+   frame's spring and push moves, and the sliders to the worker thread.
+3. **The worker** (`FmWorker`) runs `fm::Frame`: per breast a limb comes near, the nodes, the limb shapes, the
+   candidates, then up to 12 Gauss-Seidel sweeps warm-started from the last frame; it writes the records (`fm::Records`:
+   the f16 position delta, the vertex colour, the normal and tangent turned as the deformed skin turns them) and posts
+   them. A frame it is still busy with is skipped; a still pose settles to one sweep.
+4. **The upload.** The update thread takes the newest finished records once and writes all of them with the engine's
+   own buffer update (staged, then copied to the GPU by its upload service). A write that can't happen yet stays due.
+5. **Modes** (`[FreeMorph] iModeKey`, none by default): contact, a 1 cm dent going round the left breast, the file's own
+   records, off (weight 0).
+
+Costs measured in game: the solve 0.25 to 1 ms on its thread while the hands move (5 ms at most), about 0.2 ms once a
+hold has settled; 10 to 12 µs a frame on the update thread.
+
 ## Build variants
 
 | Define | `kDiag` | `kCollisions` | What's in it |
 |---|---|---|---|
 | none (`build.bat`) | true | true | everything: log, statistics, samples, collisions, dents, world collision |
-| `TFP_RELEASE` | false | false | gravity, springs, body shape |
-| `TFP_RELEASE` + `TFP_RELEASE_COLLISIONS` | false | true | the above + the collisions, also between bodies, and the dents (the build A-Body 1.5 ships) |
+| `TFP_RELEASE` | false | false | gravity, springs, body shape, the masses, the relative damping |
+| `TFP_RELEASE` + `TFP_RELEASE_COLLISIONS` | false | true | the above + the collisions, also between bodies, the dents and FreeMorph (the build A-Body 2.0 ships) |
 
 The release builds also force the world collision and the snapshots off, whatever the INI says. The tuning files work
 in every build.
@@ -231,6 +284,11 @@ in every build.
 - collisions: bodies checked, pushes, contacts by pair with the deepest, other bodies and the shared table;
 - dents: body updates with a dent rig and their cost, how many were dented, the deepest dent, dent bone move and
   turn, regions solved and regions kept as they were, and the write check;
+- the breast and glute masses (steps, the largest offset per axis) and the relative damping (springs kicked, the
+  largest steady lag taken off);
+- FreeMorph: the mode, the weight and record writes and their cost, the solves on the worker thread (time, frames
+  skipped), each breast's contacts, held and sliding points, press and rise, the buffer, and any write refused, with
+  why;
 - one gravity sample;
 - the world-collision lines.
 

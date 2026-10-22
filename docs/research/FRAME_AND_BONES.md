@@ -82,6 +82,19 @@ In the per-actor update (`0x15cb6e0`, ID 91213):
 - **Weights per vertex:** at most 8 (`shaderspc_dx12_105.fxp`, the game's one shader pack). A shape with 65,536
   vertices or more isn't skinned.
 
+## 7. Performance morphs
+
+- A morph record with a performance folder (TMPP) gives the naked body's geometry a performance morph from that
+  folder's `morph.dat` (confirmed in game).
+- A MorphDriver record on the naked body's addon with MaxAnimationDistance -1 binds to the geometry that has its morph,
+  and its weight (instance +0x28) stays as written (confirmed in game).
+- A performance morph's records can be rewritten every frame through `UpdateBuffer` (ID 142878), and the body draws
+  them, lit by the turned normals, the next frame (confirmed in game: 3,049 records, 48,784 bytes a frame).
+- The targets buffer as the game makes it: size 65,536 for 48,784 bytes of records, usage 1, stride 16, count 3,049
+  (confirmed in game).
+- Another SFSE plugin may hook `UpdateBuffer`: its first bytes are then a jump; the function's body after the jump's
+  bytes is the game's.
+
 ## Hard risks
 
 1. **A write inside `AnimationManager::Update` is lost:** the snapshot applier rewrites the rig locals after it.
@@ -94,3 +107,7 @@ In the per-actor update (`0x15cb6e0`, ID 91213):
    the Address Library.
 8. **250 to 255 bones on one shape are unproven:** the code that packs a shape's bones for the shaders is unread;
    249 draw.
+9. **A mod that overrides the naked body's addon or the body's morph record** after the body's plugin drops the
+   MorphDriver or the performance folder: the free morph is then gone.
+10. **`bKeepPerformanceMorphHandle` set** would share one copy of the morphs between bodies, so a write would reach
+   every body with that geometry: TF Physics' writes stay off then.

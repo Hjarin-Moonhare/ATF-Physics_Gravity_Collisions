@@ -644,14 +644,20 @@ int main(int argc, char** argv) {
             if (resolved) ResolveWorldAddresses(db, runtime, imageSize);   // the proxy watch's classes
             g_gravityScaleOk = g_formIdOk = g_wornOk = false;
             if (resolved) ResolveTuneAddresses(db, runtime, imageSize);   // the tuning's three reads
+            g_fmOk = true;   // FreeMorph's reads of the game's code (its data file is not needed for them)
+            g_fmWritesOk = false;
+            g_fmMdVt = g_fmGeomVt = 0;
+            if (resolved) FmResolveAddresses(db, runtime, imageSize);
+            const bool fm = g_fmOk && g_fmWritesOk && g_fmMdVt && g_fmGeomVt;
+            g_fmOk = false;
             snprintf(d, sizeof(d), "resolved %d, CheckGame %d (paths B %d, C %d), size reading %d, triangle %d, life state %d, "
-                     "world proxies %d (writes %d, motion tables %d), tuning reads %d %d %d (mapped in %.1f s)", resolved,
-                     installs, g_siteActorOk[1], g_siteActorOk[2], g_actorVt != 0, g_triangleOk, g_deadOk, g_proxyOk,
-                     g_proxyWriteOk, g_proxyMotionOk, g_gravityScaleOk, g_formIdOk, g_wornOk,
+                     "world proxies %d (writes %d, motion tables %d), tuning reads %d %d %d, FreeMorph's code %d (mapped in "
+                     "%.1f s)", resolved, installs, g_siteActorOk[1], g_siteActorOk[2], g_actorVt != 0, g_triangleOk, g_deadOk,
+                     g_proxyOk, g_proxyWriteOk, g_proxyMotionOk, g_gravityScaleOk, g_formIdOk, g_wornOk, fm,
                      static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(fq.QuadPart));
             Report("real Starfield.exe: every check passes", d,
                    installs && g_siteActorOk[1] && g_siteActorOk[2] && g_actorVt && g_triangleOk && g_deadOk && g_proxyOk &&
-                       g_proxyWriteOk && g_proxyMotionOk && g_gravityScaleOk && g_formIdOk && g_wornOk);
+                       g_proxyWriteOk && g_proxyMotionOk && g_gravityScaleOk && g_formIdOk && g_wornOk && fm);
             VirtualFree(img, 0, MEM_RELEASE);
         } else {
             Report("real Starfield.exe: every check passes", "could not read it", false);

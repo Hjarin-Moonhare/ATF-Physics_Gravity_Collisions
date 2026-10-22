@@ -114,6 +114,50 @@ and its bytes.
 `DentRig_B.bin` (156: 78 per breast; 249 bones) and `DentRig_C.bin` (version 2, 160: 80 per breast on every bone
 their skin hangs on, 30 control points per breast, tilting; 253 bones) are A-Body's three rigs.
 
+## Masses and damping
+
+- **Breast mass:** on the breast anchors `L_Pecs` / `R_Pecs`, the bones the four breast springs hang under. Their
+  offset goes on the anchor's local position with the gravity offset.
+- **Glute mass:** on the parent of the `TF_Glute_*_L` / `_R` springs (`L_Butt` / `R_Butt` on A-Body), found from the
+  springs every update.
+- **Relative damping:** every spring whose target is named `TF_*` or `*_Nipple`.
+
+## FreeMorph
+
+What a body needs for the hand contact:
+
+- **A free performance morph** on the body geometry: the morph `TFFREE`, with a record for every vertex of both breast
+  zones (the record order is the vertex order), at rest in the file. On A-Body it sits in
+  `meshes\morphs\human\female\performance\body\morph.dat`, the folder the female body's morph record
+  (`MORPH_Human_Female_Body`) names in its TMPP field.
+- **One MorphDriver record** for it on the naked body's addon (`AA_Naked_Body`, its female list): driver `COM`, morph
+  `TFFREE`, MaxAnimationDistance -1, so the game never weighs it and the weight stays as TF Physics writes it. A
+  BNAM list only builds records from its own plugin, so the record and the list are in the same plugin.
+- **`FreeMorph.bin`** in `Data\SFSE\Plugins\TFPhysics\`, made for that geometry. Little endian; a string is a u16
+  length and its bytes:
+  - `TFFM0001`, str morph, u32 body vertices, u32 records;
+  - u32 bones, per bone: str name, u8 has bind, then (if it has) f32 r[9] (mesh to bone, row by row, scale in) and
+    f32 t[3];
+  - u32 sliders, per slider: str name (`Thin`, `Strong`, `Overweight` are the body triangle, the rest the sliders'
+    keys);
+  - f32 cut, cap1, cap2, grip, cand, reach, tol, release (s), fd, reg (m/N), regT (m/N); u32 sweeps; f32 the dent's
+    depth, sigma, ring, spread;
+  - u32 shapes, per shape: u8 kind, side (0 left, 1 right), part (0 hand, 1 forearm, 2 upper arm); kind 0 (round cone):
+    u16 bone a, bone b, f32 a[3], b[3] (each in its bone's frame), r1, r2; kind 1 (rounded box): u16 bone, f32 c[3],
+    R[9] (row by row, the columns are the box's axes), h[3], r;
+  - u32 regions, per region: str name, u8 side; u32 n, per node: f32 p[3] (mesh space), n[3] (outward), depth (m), u8
+    fixed, u8 nLbs, (u16 bone, f32 weight) x nLbs, u8 nDelta, (u16 slider, f32 d[3]) x nDelta; then per node: u32
+    count, u32 inner, f32 scale, u16 idx[count] (nearest first), i16 vals[count x 9] (`[d * 3 + c]`: node idx's move
+    along c under a force along d at this node, x scale); u32 triangles, u16 tri[3 x triangles]; u32 vertices, per body
+    vertex on the region: u16 node, u32 record, f32 N[3], Tan[3] (the mesh's), u16 colour (5:6:5); u32 ring, u16 ring
+    nodes, f32 their angles (rad).
+- A body vertex follows its node: on A-Body's Never nude body the swimsuit's vertices over the breasts are vertices of
+  the regions too, each on the skin node under it.
+- The bones each node leans on, and each shape's bones, are found by name under `COM`. Until every one is there, the
+  contact is off (the log says how many were found).
+- A-Body's `FreeMorph.bin` per breast: about 1,525 nodes, their responses within 8 cm (about 660,000 table entries),
+  7 layers of the volume down to the chest wall; 62 limb shapes; 27 MB.
+
 ## World collision (test builds only)
 
 A-Body's world-collision test skeletons add two nodes, `ABody_Proxy_Breast_L` and `_R`, under the Pecs. Each carries a

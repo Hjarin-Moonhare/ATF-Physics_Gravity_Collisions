@@ -7,7 +7,7 @@ under Git Bash `find` is the Unix one.
 
 | Script | Builds and runs | Output in | Time |
 |---|---|---|---|
-| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `tune_dump` (on `config\TFPhysics.ini`), `dent_test`, `addrlib_test` | `build\tests` | about 30 s |
+| `run_tests.bat [game folder]` | `collide_test`, `gravity_test`, `shape_test`, `tune_dump` (on `config\TFPhysics.ini`), `dent_test`, `breast_mass_test`, `freemorph_test` (with `data\FreeMorph.bin`), `addrlib_test` | `build\tests` | about 40 s |
 | `run_stress.bat` | `stress_test`, as the logging build | `build\tests` | about 15 s |
 | `run_stress_release_collisions.bat` | `stress_test`, as the release with collisions | `build\tests_relcol` | about 15 s |
 | `run_ini_check_release_collisions.bat` | `ini_check_release_collisions`, on both release INIs | `build\ini_check` | about 5 s |
@@ -171,6 +171,49 @@ load                               rig A: 50 dent bones in 6 regions, 2882 sampl
 B_folded.txt                        121 skin samples in contact, deepest dent 1.01 cm, worst difference 0.000 mm  OK
 ```
 
+## breast_mass_test.cpp
+
+The masses and the relative damping (`src\breast_mass.h`) on made-up motion, in the plugin's own code:
+
+- standing still and a steady 5 m/s: the mass at rest (no lag);
+- a walk and a run (a vertical bob and a sway, then a stop over 0.15 s) at 30, 60 and 144 fps: the walk bounces 5 to
+  25 mm along the spine, the run more, never at a hard stop, settled within 0.8 s of the stop;
+- the glutes (`bm::GluteParams`): a walk 5 to 30 mm, the run never at a hard stop, settled;
+- the run's bounce within 20% at 30 and 144 fps;
+- a 5 s fall at 1 g (49 m/s) and a sudden landing, both masses, at 30, 60 and 144 fps: no frame moves more than 2 mm,
+  the mass floats up in the fall, stays inside its hard stops and settles within 1.2 s of landing;
+- a teleport (30 m in a frame) moves nothing;
+- the relative damping on a model of the game's spring at 4 m/s: the lag c v / S without it, under a quarter of that
+  with it.
+
+```
+   60 fps  walk: spine +9.5 / -9.5, fwd +0.0 / -0.0, side +2.7 / -2.7 mm, settles 0.53 s after stopping | run: spine +24.8 / -32.2, fwd +0.0 / -0.0, side +10.3 / -10.3 mm, settles 0.55 s
+breast fall  60 fps: in the fall +20.3 mm (most change a frame 0.15 mm); range +22.7 / -31.5 mm; settles 0.45 s after landing
+PASSED: 0 failures
+```
+
+## freemorph_test.cpp
+
+FreeMorph's solve (`src\freemorph_core.h`) against its design model (A-Body's `freemorph.py`, the same steps in
+Python) on the model's test vectors (`data\freemorph_vectors.bin`): both hands closing on the breasts over 12
+frames, then held. It needs the `FreeMorph.bin` the vectors were made for, A-Body 2.0's (Nude or Tan lines skin), in
+`data\`; without it `run_tests.bat` skips it. Frame by frame:
+
+- each breast's shown displacement against the model's: exact while fewer than 20 nodes touch, the press and the rise
+  within 1 mm after, no node more than 5 mm off (the grip's holds are path-dependent: float and double part ways a
+  little once many nodes touch);
+- the contacts and held points against the model's (at most 12 apart);
+- the records after the last frame (the position within 5 mm), and the moving dent's records (the position within
+  0.01 mm, the 10-bit fields within one step, the colours exact);
+- the grab held on for 10 s at 60 fps: whether the solve settles, and how long a frame takes.
+
+```
+shown displacement: at most 3.769 mm off the model (breast_L 3.769, breast_R 2.856); contacts off by at most 4, held by 6; while under 20 nodes touch at most 0.0003 mm off; the press and the rise at most 0.424 mm off
+records after the grab: 2691 of 3049 differ in bytes; position at most 1.0967 mm off, 10-bit fields at most 171 steps off (8562 fields), colours 0
+held 10 s: 0.30 ms a frame on average, 3.89 ms at most
+ALL PASSED
+```
+
 ## addrlib_test.cpp
 
 - **SFSE's view of the plugin:** it loads on any game version that has its Address Library database (address bits
@@ -192,7 +235,8 @@ B_folded.txt                        121 skin samples in contact, deepest dent 1.
   An unreadable address fails the check without a crash, and a tuning read outside the image turns all three off.
 - **With the game:** the real database (every ID found, and 25 of 25 equal the known 1.16.244 RVAs), refused while
   another game version runs, the 1.16.242 and 1.16.236 databases, and every check on the real `Starfield.exe`, read
-  only.
+  only, FreeMorph's included: the MorphDriver instance and geometry classes, the buffer update, the morph table's
+  reads, MorphDB's targets holder and the per-body copies setting.
 
 It looks for the game in `run_tests.bat`'s first argument, then in `STARFIELD_DIR`, then in the usual Steam folders.
 Without the game those cases print `SKIPPED`; they don't fail.
@@ -231,20 +275,24 @@ Fixed:
 collision 1 measureOnly 0 others 1 othersMeasureOnly 0 deadBodies 0 glutes 1 innerThighs 0
 softScale 1.10 maxPush 0.050 0.030 0.030 0.025 other 0.030 m
 bodyShape 0 stretchGuard 1 gravity 1 | world proxies 0 layer 0 steer 0 snapshots 0
+breast mass 1 x1.00, glute mass 1 x1.00, relative damping 1 | FreeMorph 1 key 0 start 2 grip -1.0 give -1.0 cap x1.00 own pushes 0
 OK
 ```
 
-The two INIs differ only in `bodyShape`: 0 in Fixed, 1 in Variable. The world features stay at 0 in a release.
+The two INIs differ only in `bodyShape`: 0 in Fixed, 1 in Variable. The world features stay at 0 in a release; the
+masses, the relative damping and FreeMorph are on, with no FreeMorph mode key.
 
 ## run_analyze.bat
 
 Runs MSVC `/analyze` with all warnings on the plugin, writes `build\analyze.txt` and prints the warning count. Nothing
-is built. The 27 it reports are known:
+is built. The 30 it reports are known:
 
 - 22 are C4865 in the Windows SDK's own headers (enum types under `/Wall`);
 - 3 are C5219, integers turned into floating point: the log's run time, the sub-step count and the thigh tilt's
   average;
-- 2 are C4365, `int` to `size_t` in the child-list discovery's log.
+- 2 are C4365, `int` to `size_t` in the child-list discovery's log;
+- 3 are C6001 in `freemorph_core.h`'s smooth union of the limb shapes: arrays filled for every shape used before
+  they're read (the analysis doesn't follow the count).
 
 ## run_benchmarks.bat
 

@@ -226,3 +226,23 @@ At these limits the skin itself moves up to about 2 to 4 cm.
 A spring's rest point, per COM axis, is the larger of its own steady sag (held at 85% of its 60 fps travel, as its
 swing shows it) and its part's gravity shape. Nothing is stepped on a paused frame: no spring, record, damping or
 velocity is written, so the springs go on from their own state when the game runs again.
+
+## Masses, damping and hand contact (TFPhysics.ini)
+
+| Key | Default | What it does |
+|---|---|---|
+| `[Springs] bRelativeDamping` | 1 | every body spring (`TF_*`, `*_Nipple`) damped against the body's motion, not the world's; 0 = the game's own damping |
+| `[BreastMass] bEnabled` | 1 | each whole breast one damped mass on its anchor; 0 = the springs alone |
+| `[BreastMass] fScale` | 1.0 | its swing x this (0 to 2), on top of the breasts' level |
+| `[GluteMass] bEnabled` | 1 | each glute one damped mass on `L_Butt` / `R_Butt` |
+| `[GluteMass] fScale` | 1.0 | its swing x this (0 to 2), on top of the butt's level |
+| `[FreeMorph] bEnabled` | 1 | the hand contact on the player's breasts (a body with FreeMorph data) |
+| `[FreeMorph] iModeKey` | 0 | a key that steps through the modes (a Windows key code: 0 = none, 111 = Numpad /) |
+| `[FreeMorph] iStartMode` | 2 | the mode at the start: 2 contact, 1 a 1 cm dent going round the left breast, 0 the file's own records, 3 off |
+| `[FreeMorph] fGrip` | -1 | how far a pressing finger drags the skin before it slides, in mm (0 to 30; -1 = the data's, 10) |
+| `[FreeMorph] fHoldGive` | -1 | a held point's sideways give, in mm per newton (at least 7; -1 = the data's, 10) |
+| `[FreeMorph] fCapScale` | 1.0 | the press's soft cap (a third to a half of the tissue's depth) x this (0.3 to 1.5) |
+| `[FreeMorph] fDentSpeed` | 0.5 | the moving dent's turns per second (0 to 4) |
+| `[FreeMorph] bOwnPushes` | 0 | 1 = in contact the arms' capsule pushes and the lift work on the breasts too; 0 = the free morph alone answers the player's own arms there |
+
+The masses scale with the part's jiggle level (a part at `Off` has none). They are read when the game starts.
